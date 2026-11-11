@@ -2518,14 +2518,14 @@ mod tests {
             r#"
             [uplink]
             spool_only = true
-            spool_path = "{spool}"
+            spool_path = '{spool}'
             audio_format = "wav"
             [recorder]
             instance_id = "conv-test"
             [[device]]
             id = "vhf"
             backend = "iqfile"
-            path = "{capture}"
+            path = '{capture}'
             sample_rate = {CONV_RATE}
             center_frequency = {CONV_CENTER}
             pacing = "unthrottled"

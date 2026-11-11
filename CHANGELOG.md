@@ -5,6 +5,11 @@ All notable changes to trunkd are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Until 1.0, minor versions may
 change configuration or behaviour; the entry says how.
 
+## [0.2.1] - 2026-11-11
+
+- Tests: temp-directory paths in test configs are TOML literal strings, so the
+  Windows test run (and the release build) no longer fails on backslashes.
+
 ## [0.2.0] - 2026-11-11
 
 - Analog NBFM conventional channels (`[[channel]]`): cut from a tuner's

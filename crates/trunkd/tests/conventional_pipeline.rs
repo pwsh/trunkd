@@ -218,7 +218,7 @@ fn config_toml(capture: &Path, spool: &Path, upload_url: &str) -> String {
         r#"
 [uplink]
 {uplink}
-spool_path = "{spool}"
+spool_path = '{spool}'
 system_label = "{UPLINK_SYSTEM}"
 site_label = "{UPLINK_SITE}"
 audio_format = "mp3"
@@ -230,7 +230,7 @@ instance_id = "conv-e2e"
 [[device]]
 id = "vhf0"
 backend = "iqfile"
-path = "{path}"
+path = '{path}'
 sample_rate = {RATE}
 center_frequency = {CENTER_HZ}
 pacing = "unthrottled"
