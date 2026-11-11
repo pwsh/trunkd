@@ -1,0 +1,19 @@
+[package]
+name = "trunkd-call"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Call assembly for trunkd: PCM accumulation, per-transmission metadata, MP3/WAV encode and trunk-recorder JSON sidecars."
+
+[dependencies]
+trunkd-core.workspace = true
+serde.workspace = true
+serde_json = "1"
+hound = "3.5"
+mp3lame-encoder = "0.2.5"
+thiserror.workspace = true

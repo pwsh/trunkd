@@ -1,0 +1,1667 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The local control panel, served whole from GET /. No external assets: the
+     recorder may be on a box with no route to the internet, and a panel that
+     needs a CDN to render is a panel that fails exactly when you need it. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trunkd</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262d38; --ink: #d7dde5;
+    --dim: #8b95a3; --accent: #4fb8ff; --ok: #46d17a; --warn: #e8b93b;
+    --bad: #ef6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 var(--mono);
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 2;
+  }
+  header h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
+  header .sp { flex: 1 1 auto; }
+  .dim { color: var(--dim); }
+  .src { color: var(--dim); font-size: 9px; vertical-align: super; cursor: help; }
+  main { padding: 12px 14px 40px; display: grid; gap: 14px; }
+  h2 {
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--dim); margin: 0 0 6px; font-weight: 600;
+  }
+  .cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 10px 12px; }
+  .card .top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .card .key { font-weight: 600; color: var(--ink); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  /* A capped, scrolling, corner-resizable box: ten table rows (a header plus
+     rows of 3px padding around 13px/1.45 text, about 26px each) before the scroll bar appears. */
+  .scrollbox { height: 286px; min-height: 60px; overflow: auto; resize: vertical; }
+  .scrollbox table thead th { position: sticky; top: 0; background: var(--panel); }
+  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 8px 12px; }
+  .strip { display: flex; flex-wrap: wrap; gap: 2px 22px; }
+  .strip div { white-space: nowrap; }
+  .pill { border-radius: 9px; padding: 0 7px; font-size: 11px; border: 1px solid var(--line); }
+  .ok { color: var(--ok); border-color: #24502f; }
+  .warn { color: var(--warn); border-color: #4d4020; }
+  .bad { color: var(--bad); border-color: #562727; }
+  button {
+    font: inherit; color: var(--ink); background: #1f2732; border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 9px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input {
+    font: inherit; color: var(--ink); background: #0b0e13; border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 6px; width: 15em;
+  }
+  .msg { min-height: 1.4em; margin-top: 6px; font-size: 12px; }
+  #banner { display: none; padding: 6px 14px; background: #3a1d1d; color: #ffc9c9; border-bottom: 1px solid #562727; }
+  select, textarea {
+    font: inherit; color: var(--ink); background: #0b0e13; border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 6px; width: 15em;
+  }
+  textarea { width: 26em; height: 3.6em; resize: vertical; }
+  /* The device editor lays label/control pairs out in a grid, so a `hidden`
+     sub-grid has to beat the class that gave it `display: grid`. */
+  [hidden] { display: none !important; }
+  #applybar {
+    display: none; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 6px 14px; background: #3a3218; color: #ffe9a8; border-bottom: 1px solid #4d4020;
+  }
+  #applybar.on { display: flex; }
+  .edit { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+  .edit h3, .subhead {
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--dim); margin: 12px 0 4px; font-weight: 600;
+  }
+  .edit .grid { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; align-items: baseline; }
+  .edit .f { color: var(--dim); }
+  .row { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+  .kvrow { margin-bottom: 3px; }
+  .kvrow input { width: 10em; }
+  .sitebox { display: flex; flex-wrap: wrap; gap: 2px 18px; }
+  .sitebox label { color: var(--ink); }
+  input.num { width: 10em; }
+  input[type="checkbox"] { width: auto; vertical-align: middle; }
+  /* Signal meters on a tuner card: three bars that answer "is this front end
+     hearing the site?" without reading five numbers first. An absent reading
+     draws an empty bar rather than a zero — an older recorder and a dead front
+     end are not the same thing, and a full-width red bar would say they were. */
+  .meters { display: grid; gap: 3px; margin: 0 0 7px; }
+  .meter { display: grid; grid-template-columns: 3.8em 1fr 5.6em; gap: 8px; align-items: center; }
+  .meter .mlabel { color: var(--dim); font-size: 11px; }
+  .meter .mbar {
+    height: 8px; background: #0b0e13; border: 1px solid var(--line);
+    border-radius: 4px; overflow: hidden;
+  }
+  .meter .mfill { display: block; height: 100%; background: var(--dim); }
+  .meter .mfill.ok { background: var(--ok); }
+  .meter .mfill.warn { background: var(--warn); }
+  .meter .mfill.bad { background: var(--bad); }
+  .meter .mval { font-size: 11px; text-align: right; white-space: nowrap; }
+  .meter .mnote { grid-column: 2 / 4; font-size: 11px; color: var(--dim); }
+  pre { margin: 0; white-space: pre; }
+  /* The expandable per-site profile. The chevron is a real button so it is in
+     the tab order and answers to Enter and Space without any help from us. */
+  .chev, .psech {
+    background: none; border: 0; color: var(--dim); padding: 0 4px;
+    font: inherit; cursor: pointer;
+  }
+  .chev:hover, .psech:hover, .chev:focus-visible, .psech:focus-visible { color: var(--accent); }
+  .profrow > td { padding: 0 0 10px; border-bottom: 1px solid var(--line); }
+  .prof { display: grid; gap: 6px; padding: 4px 0 2px 22px; }
+  .psech {
+    display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 11px;
+    font-weight: 600; padding: 2px 0;
+  }
+  .psecb { padding: 0 0 2px 14px; }
+  .psecb table { width: auto; min-width: 40%; }
+  .psecb th, .psecb td { padding-right: 14px; border-bottom: 1px solid var(--line); }
+  .pills { display: flex; flex-wrap: wrap; gap: 3px 5px; }
+  .ulist { margin: 0; padding-left: 16px; }
+  .ulist li { color: var(--warn); }
+</style>
+
+<header>
+  <h1>trunkd</h1>
+  <span id="instance" class="dim">…</span>
+  <span id="version" class="dim"></span>
+  <span id="uptime" class="dim"></span>
+  <span id="station" class="dim"></span>
+  <span class="sp"></span>
+  <label class="dim">token <input id="token" type="password" placeholder="none set" autocomplete="off"></label>
+  <button id="devbtn" type="button">Devices</button>
+  <button id="cfgbtn" type="button">config</button>
+  <a href="/about" style="color: var(--accent); text-decoration: none;">about</a>
+  <span id="tick" class="dim"></span>
+</header>
+<div id="banner"></div>
+<!-- The config file on disk has moved ahead of the running recorder. Driven by
+     `restart_pending` in the status poll (and set the moment a write lands),
+     because a saved device that is quietly doing nothing is a bad thing to own. -->
+<div id="applybar">
+  <span>Configuration on disk differs from the running recorder &mdash;</span>
+  <button id="applybtn" type="button">Apply (reload)</button>
+  <span id="applymsg" class="dim"></span>
+</div>
+
+<main>
+  <section>
+    <h2>Counters</h2>
+    <div class="wrap strip" id="counters"></div>
+  </section>
+
+
+  <section>
+    <h2>Uplink</h2>
+    <div class="wrap">
+      <div class="strip" id="uplink"></div>
+      <div class="msg" id="uplinkmsg"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Recorder settings</h2>
+    <div class="wrap">
+      <div class="strip" id="recorder"></div>
+      <div class="strip" id="linkcfg"></div>
+      <table id="linkpeers"></table>
+    </div>
+  </section>
+
+  <!-- What is coming through right now, and what just did. Fed by the `calls`
+       object in the status poll; the listen buttons drive the Live monitor
+       controls below rather than opening a second player. -->
+  <section>
+    <h2>Activity</h2>
+    <div class="wrap">
+      <div class="dim">On air</div>
+      <table id="onair"></table>
+      <div class="dim">Recent calls</div>
+      <!-- Ten rows tall by default and resizable by its corner handle; the list
+           behind it keeps the last sixty. -->
+      <div id="recentbox" class="scrollbox">
+        <table id="recentcalls"></table>
+      </div>
+    </div>
+  </section>
+
+  <section id="privsec" hidden>
+    <h2>Private calls</h2>
+    <div class="wrap"><table id="privcalls"></table></div>
+  </section>
+
+  <section id="monsec" hidden>
+    <h2>Live monitor</h2>
+    <div class="wrap">
+      <div class="row">
+        <label class="dim">traffic
+          <select id="monfilter">
+            <option value="">all traffic</option>
+            <option value="tg">one talkgroup</option>
+          </select>
+        </label>
+        <input id="montg" class="num" type="number" min="0" step="1" placeholder="talkgroup" hidden>
+        <button id="monbtn" type="button">listen</button>
+        <button id="monstop" type="button">stop</button>
+        <span id="monmsg" class="dim"></span>
+      </div>
+      <div class="row"><audio id="monaudio" controls preload="none"></audio></div>
+      <div class="dim">Decoded voice as this recorder vocodes it, mixed when more than one
+        call is on at once. Off unless <code>[server] live_audio</code> is set. Expect a few
+        seconds of buffering delay, and silence from encrypted calls — they carry no audio to
+        play. Listening to finished calls stays in Keyup.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tuners</h2>
+    <div class="cards" id="tuners"></div>
+  </section>
+
+  <section>
+    <h2>Sites</h2>
+    <div class="wrap"><table id="sites"></table></div>
+  </section>
+
+  <section>
+    <h2>Supervisor</h2>
+    <div class="wrap"><table id="supervisor"></table></div>
+  </section>
+
+  <section id="devsec" hidden>
+    <h2>Devices</h2>
+    <div class="wrap">
+      <div id="devunavail" class="dim" hidden>device setup is not available in this build</div>
+      <div id="devbody">
+        <div id="devpath" class="dim"></div>
+        <div class="msg" id="devmsg"></div>
+        <table id="devhw"></table>
+        <div id="deveditor"></div>
+        <div class="subhead">Configured devices</div>
+        <table id="devcfg"></table>
+      </div>
+    </div>
+  </section>
+
+  <section id="cfgsec" hidden>
+    <h2>Config (secrets redacted)</h2>
+    <div class="wrap"><pre id="cfg"></pre></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = "trunkd.panel.token";
+
+// The token is a local convenience, not a session: it lives in this browser
+// only and is sent as a bearer header on every API call when set.
+const tokenBox = $("token");
+try { tokenBox.value = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { /* private mode */ }
+tokenBox.addEventListener("input", () => {
+  try { localStorage.setItem(TOKEN_KEY, tokenBox.value); } catch (e) { /* ignore */ }
+});
+
+function headers() {
+  const t = tokenBox.value.trim();
+  return t ? { Authorization: "Bearer " + t } : {};
+}
+
+function banner(text) {
+  const b = $("banner");
+  b.textContent = text || "";
+  b.style.display = text ? "block" : "none";
+}
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function mhz(hz) { return hz ? (hz / 1e6).toFixed(4) + " MHz" : "—"; }
+function num(v, d = 0) { return (v === null || v === undefined) ? "—" : Number(v).toFixed(d); }
+function dur(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600),
+        m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if (d) return `${d}d ${h}h ${m}m`;
+  if (h) return `${h}h ${m}m ${sec}s`;
+  return m ? `${m}m ${sec}s` : `${sec}s`;
+}
+function mib(bytes) { return (Number(bytes || 0) / 1048576).toFixed(1); }
+
+function stateClass(s) {
+  if (s === "running") return "ok";
+  if (s === "degraded" || s === "restarting" || s === "retrying") return "warn";
+  return "bad";
+}
+
+// One bar. `has` is the whole point of the signature: every field behind these
+// is optional, and "no reading" has to draw differently from "reading of zero"
+// — an empty outline, an em dash, and no colour at all.
+function meterRow(label, has, text, pct, cls, note) {
+  const w = has ? Math.max(0, Math.min(100, pct)) : 0;
+  return '<div class="meter">'
+    + `<span class="mlabel">${esc(label)}</span>`
+    + `<span class="mbar"><span class="mfill ${has ? cls : ""}" style="width:${w.toFixed(0)}%"></span></span>`
+    + `<span class="mval ${has ? cls : "dim"}">${has ? esc(text) : "—"}</span>`
+    + (note ? `<span class="mnote">${esc(note)}</span>` : "")
+    + "</div>";
+}
+
+// The three questions an operator asks a tuner from across the room: is there
+// signal on the ADC, does the control channel stand above the noise, and does
+// what arrives actually decode. The dBFS and dB scales are picked to put a
+// working P25 front end in the upper half of the bar, not to be linear in
+// anything physical: -100..-20 dBFS spans a usable ADC level, and 40 dB of SNR
+// is well past the point where more stops helping.
+function meters(t) {
+  const val = (v) => (v === undefined || v === null || !Number.isFinite(Number(v)))
+    ? null : Number(v);
+  const lvl = (x, hi, lo) => x >= hi ? "ok" : x >= lo ? "warn" : "bad";
+
+  const rssi = val(t.rssi_dbfs);
+  const sig = rssi === null ? 0 : Math.max(0, Math.min(100, (rssi + 100) / 80 * 100));
+  const snr = val(t.snr_db);
+  const dec = val(t.tsbk_pass_pct);
+  const loss = val(t.sync_losses_per_min);
+
+  return '<div class="meters">'
+    + meterRow("signal", rssi !== null, rssi === null ? "" : num(rssi, 1) + " dBFS",
+               sig, lvl(sig, 50, 25))
+    + meterRow("snr", snr !== null, snr === null ? "" : num(snr, 1) + " dB",
+               snr === null ? 0 : snr / 40 * 100, snr === null ? "" : lvl(snr, 20, 10))
+    + meterRow("decode", dec !== null, dec === null ? "" : num(dec, 1) + "%",
+               dec === null ? 0 : dec, dec === null ? "" : lvl(dec, 95, 80),
+               loss === null ? "" : `${num(loss, 1)} sync losses/min`)
+    + "</div>";
+}
+
+// Which card row each overridable field shows up in, so a value keyup set can
+// be marked where the operator actually reads it. Fields with no row of their
+// own (bands, data_follow, enabled, spectrum, ...) are still named in the
+// summary row, which always lists every one of them.
+const OVERRIDE_ROW = {
+  role: "role", site: "role",
+  center_frequency: "center", sample_rate: "center",
+  gain: "gain", gains: "gain", agc: "gain", lna_db: "gain", vga_db: "gain", amp: "gain",
+  ppm: "auto ppm", auto_ppm: "auto ppm", auto_ppm_limit: "auto ppm",
+};
+
+function tunerCard(t, sup) {
+  // The fields running on keyup's desired state rather than the TOML. A
+  // recorder too old to send the list sends nothing at all, and that is
+  // "unknown", not "none": mark nothing rather than imply the file is in
+  // charge of everything.
+  const ov = Array.isArray(t.overrides) ? t.overrides : [];
+  const srcTag = (row) => {
+    const fields = ov.filter((f) => OVERRIDE_ROW[f] === row);
+    if (!fields.length) return "";
+    const title = fields.includes("role") && t.file_role
+      ? `Keyup desired state v${t.applied_version}; file says ${t.file_role}`
+      : `set by Keyup's desired state v${t.applied_version} (file value unknown; ${fields.join(", ")})`;
+    return ` <span class="src" title="${esc(title)}">keyup</span>`;
+  };
+  const pending = t.pending ? '<span class="pill warn">pending</span>' : "";
+  const lock = t.locked
+    ? '<span class="pill ok">locked</span>'
+    : '<span class="pill bad">no lock</span>';
+  const d = t.description || {};
+  // Gain settings are flat, effective values on the wire (the old `gain`
+  // object is gone): `gain`, per-element `gains`, `agc`, and the HackRF trio.
+  const has = (v) => v !== undefined && v !== null;
+  const gainEls = Object.entries(t.gains || {}).map(([k, v]) => `${esc(k)} ${v}`);
+  const gain = [
+    has(t.gain) ? `gain ${t.gain}` : null,
+    ...gainEls,
+    has(t.agc) ? `agc ${t.agc ? "on" : "off"}` : null,
+    has(t.lna_db) ? `lna ${t.lna_db}` : null,
+    has(t.vga_db) ? `vga ${t.vga_db}` : null,
+    has(t.amp) ? `amp ${t.amp ? "on" : "off"}` : null,
+  ].filter(Boolean).join(" · ");
+  const rows = [
+    ["role", esc(t.role) + srcTag("role") + (t.site ? ` <span class="dim">· ${esc(t.site)}</span>` : "")],
+    ["receiver", esc(d.receiver || t.backend) + (d.antenna ? ` <span class="dim">· ${esc(d.antenna)}</span>` : "")],
+    ["center", `${mhz(t.center_hz)}${srcTag("center")} <span class="dim">span ${(t.span_hz / 1e6).toFixed(2)} MHz</span>`],
+    ["control", `${lock} ${mhz(t.control_hz)} <span class="dim">nac 0x${(t.nac || 0).toString(16)}</span>`],
+    ["tsbk/s", num(t.tsbk_rate, 1)],
+    ["rssi", t.rssi_dbfs !== undefined && t.rssi_dbfs !== null ? num(t.rssi_dbfs, 1) + " dBFS" : "—"],
+    ["snr", t.snr_db !== undefined && t.snr_db !== null ? num(t.snr_db, 1) + " dB" : "—"],
+    ["noise floor", t.noise_floor_dbfs !== undefined && t.noise_floor_dbfs !== null
+      ? num(t.noise_floor_dbfs, 1) + " dBFS" : "—"],
+    ["carrier off", t.freq_error_hz !== undefined && t.freq_error_hz !== null ? num(t.freq_error_hz, 1) + " Hz" : "—"],
+    ["pll err", t.pll_error_hz !== undefined && t.pll_error_hz !== null ? num(t.pll_error_hz, 1) + " Hz" : "—"],
+    // `auto_ppm` is the switch; `auto_ppm_applied` is the correction it made.
+    t.auto_ppm !== undefined && t.auto_ppm !== null
+      ? ["auto ppm", (t.auto_ppm
+          ? (has(t.auto_ppm_applied) ? `${num(t.auto_ppm_applied, 2)} ppm applied` : "on, nothing applied")
+          : "off")
+        + (has(t.ppm) ? ` <span class="dim">· config ${num(t.ppm, 2)}</span>` : "") + srcTag("auto ppm")]
+      : null,
+    t.ppm_memory ? ["ppm memory", `${num(t.ppm_memory.ppm, 2)} <span class="dim">· ${esc(t.ppm_memory.measured_at)} · ${t.ppm_memory.applied_at_open ? "applied at open" : "not applied"}</span>`] : null,
+    ["overflow/s", num(t.overflow_per_s)],
+    ["pool", `${t.pool_in_use ?? 0}/${t.pool_size ?? 0} <span class="dim">· ${t.calls_active ?? 0} active</span>`],
+    ["applied", `v${t.applied_version} ${pending}`],
+    t.fault ? ["fault", `<span class="pill ${stateClass(t.fault.state)}">${esc(t.fault.state)}</span> `
+      + `${esc(t.fault.error)} <span class="dim">· ${t.fault.failures} failures · v${t.fault.version}`
+      + (t.fault.next_attempt_ms ? ` · next try in ${Math.max(0, Math.round((t.fault.next_attempt_ms - Date.now()) / 1000))}s` : "")
+      + `</span>`] : null,
+    ov.length ? ["overrides", `${esc(ov.join(", "))} <span class="dim">· from Keyup, v${t.applied_version}</span>`] : null,
+    gain ? ["gain", esc(gain) + srcTag("gain")] : null,
+    sup ? ["unit", `<span class="pill ${stateClass(sup.state)}">${esc(sup.state)}</span> `
+      + `<span class="dim">${sup.restart_count} restarts · beat ${(sup.heartbeat_age_ms / 1000).toFixed(0)}s</span>`] : null,
+  ].filter(Boolean);
+  return `<div class="card">
+    <div class="top">
+      <span class="key">${esc(t.tuner_key)}</span>
+      <span class="dim">${esc(t.backend)}${t.serial ? " · " + esc(t.serial) : ""}</span>
+      <span class="sp" style="flex:1"></span>
+      <button type="button" data-restart="${esc(t.tuner_key)}">restart</button>
+    </div>
+    ${meters(t)}
+    <dl class="kv">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>
+    <div class="msg" data-msg="${esc(t.tuner_key)}"></div>
+  </div>`;
+}
+
+function tableHtml(cols, rows) {
+  return `<thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>`
+    + `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody>`;
+}
+
+function table(el, cols, rows) { el.innerHTML = tableHtml(cols, rows); }
+
+function kvList(pairs) {
+  return `<dl class="kv">`
+    + pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")
+    + `</dl>`;
+}
+
+// -- the Sites table and its expandable per-site profile ---------------------
+//
+// The row comes from `/api/status`, which every panel polls every two seconds.
+// The profile behind the chevron is its own route (`/api/sites/{i}/detail`):
+// it is the site's whole observation document — the same one the archive gets,
+// so the two can never disagree — and nobody has it open most of the time.
+// Fetched when the chevron opens and every ten seconds while it stays open.
+
+const SITE_COLS = [
+  "", "#", "site", "control", "nac", "tsbk/s", "pll Hz", "active", "pool",
+  "services", "started", "ended", "phase 2 refused", "sync loss",
+];
+// Sites whose profile is expanded.
+const siteOpen = new Set();
+// Site index -> the last profile document fetched.
+const siteDoc = {};
+// Site index -> why the last fetch did not produce one.
+const siteErr = {};
+// `"<site>:<section>"` -> whether that section is expanded. Absent means the
+// default, which is open for everything but Traffic.
+const secState = {};
+// The last `status.sites` rendered, so opening a chevron can redraw the table
+// without waiting up to two seconds for the next poll.
+let lastSites = [];
+
+function renderSites(list) {
+  const rows = list.map((x) => {
+    const i = x.index;
+    const open = siteOpen.has(i);
+    const cells = [
+      `<button type="button" class="chev" data-site="${i}" aria-expanded="${open}"`
+        + ` aria-controls="siteprof${i}" title="site profile">${open ? "▾" : "▸"}</button>`,
+      i, esc(x.label || ""), mhz(x.control_frequency_hz),
+      "0x" + (x.nac || 0).toString(16), num(x.tsbk_rate, 1),
+      num(x.control_frequency_error_hz, 1), x.active_calls,
+      `${x.pool_in_use}/${x.pool_size}`, servicesPill(x.services_available),
+      x.calls_started, x.calls_ended, x.calls_tdma_refused ?? 0, x.sync_losses,
+    ];
+    return `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`
+      + `<tr class="profrow"${open ? "" : " hidden"}>`
+      + `<td colspan="${SITE_COLS.length}" id="siteprof${i}">`
+      + `${open ? siteProfile(i) : ""}</td></tr>`;
+  }).join("");
+  $("sites").innerHTML =
+    `<thead><tr>${SITE_COLS.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>`
+    + `<tbody>${rows}</tbody>`;
+}
+
+// What the site says it can do, in one cell. `null` is "no observation
+// document yet, or no system service broadcast heard" — both of which read as
+// nothing heard, which is the truth either way.
+function servicesPill(n) {
+  return n ? `<span class="pill ok">${n} services</span>`
+           : '<span class="pill">none heard</span>';
+}
+
+function secIsOpen(site, key) {
+  const k = site + ":" + key;
+  // Traffic is the long one, and the least likely to be the reason the profile
+  // was opened.
+  return k in secState ? secState[k] : key !== "traffic";
+}
+
+function psec(site, key, title, html) {
+  const open = secIsOpen(site, key);
+  return `<div class="psec">`
+    + `<button type="button" class="psech" data-site="${site}" data-sec="${key}"`
+    + ` aria-expanded="${open}">${open ? "▾" : "▸"} ${esc(title)}</button>`
+    + `<div class="psecb"${open ? "" : " hidden"}>${html}</div></div>`;
+}
+
+const hex = (v, w) => (v === null || v === undefined)
+  ? '<span class="dim">—</span>'
+  : "0x" + Number(v).toString(16).padStart(w, "0");
+const plain = (v) => (v === null || v === undefined)
+  ? '<span class="dim">—</span>' : esc(v);
+
+function siteProfile(i) {
+  const d = siteDoc[i];
+  if (!d) return `<div class="prof dim">${esc(siteErr[i] || "loading…")}</div>`;
+  const sys = d.system || {}, site = d.site || {};
+  const lock = d.locked
+    ? `<span class="pill ok">locked</span> ${mhz(d.control_locked_hz)}`
+    : '<span class="pill warn">not locked</span>';
+
+  const identity = kvList([
+    ["system", plain(d.system_label)],
+    ["site", plain(d.site_label)],
+    ["wacn", hex(sys.wacn, 5)],
+    ["system id", hex(sys.system_id, 3)],
+    ["nac", hex(sys.nac, 3)],
+    ["rfss", plain(site.rfss)],
+    ["site id", plain(site.site)],
+    ["lra", plain(site.lra)],
+    ["tuner", lock],
+  ]);
+
+  const control = siteControl(d);
+  const services = siteServices(d.services);
+  const bands = (d.bands || []).length
+    ? `<table>${tableHtml(["band", "base", "spacing", "offset", "bandwidth", "type"],
+        d.bands.map((b) => [
+          b.id, mhz(b.base_hz), `${(b.spacing_hz / 1000).toFixed(2)} kHz`,
+          `${(b.offset_hz / 1e6).toFixed(3)} MHz`, `${(b.bandwidth_hz / 1000).toFixed(1)} kHz`,
+          b.tdma ? "TDMA" : "FDMA",
+        ]))}</table>`
+    : '<span class="dim">no band plan heard</span>';
+
+  const traffic = siteTraffic(d.traffic || []);
+  const dc = d.data_channel || {};
+  const dataChannel = kvList([
+    ["grants", plain(dc.grants)], ["pages", plain(dc.pages)],
+    ["pdu headers", plain(dc.pdu_headers)], ["pdu blocks", plain(dc.pdu_blocks_valid)],
+    ["lrrp transport", plain(dc.lrrp_transport)], ["lrrp fixes", plain(dc.lrrp_fixes)],
+  ]);
+
+  return `<div class="prof">`
+    + psec(i, "identity", "Identity", identity)
+    + psec(i, "control", "Control", control)
+    + psec(i, "services", "Services", services)
+    + psec(i, "bands", "Band plan", bands)
+    + psec(i, "neighbours", "Neighbours", siteNeighbours(d))
+    + psec(i, "traffic", "Traffic", traffic)
+    + psec(i, "data", "Data channel", dataChannel)
+    + psec(i, "kinds", "Message kinds", siteKinds(d.message_kinds))
+    + psec(i, "unknown", "Unknown", siteUnknowns(d.unknowns || []))
+    + `</div>`;
+}
+
+function siteControl(d) {
+  const c = d.control;
+  const primary = c
+    ? `${mhz(c.frequency_hz)} <span class="dim">${esc(c.channel || "")}</span>`
+      + ` · ${num(c.tsbk_rate, 1)} tsbk/s`
+    : '<span class="dim">no control channel announced</span>';
+  const secondary = (d.secondary_control || []).length
+    ? (d.secondary_control || []).map((x) => {
+        const f = x.frequency_hz ? mhz(x.frequency_hz)
+          : '<span class="dim">frequency unknown</span>';
+        const cls = (x.service_class || []).join(", ");
+        return `<div>${f} <span class="dim">${esc(x.channel || "—")}`
+          + `${cls ? " · " + esc(cls) : ""}</span></div>`;
+      }).join("")
+    : '<span class="dim">none announced</span>';
+  const configured = (d.configured_control || []).length
+    ? (d.configured_control || []).map(mhz).join(", ")
+    : '<span class="dim">none</span>';
+  return kvList([
+    ["primary", primary],
+    ["secondary", secondary],
+    ["configured", esc(configured)],
+  ]);
+}
+
+// Available as pills; supported-but-not-available dimmed, because "the site can
+// do this but is not offering it" is a different fact from "never heard of it".
+function siteServices(s) {
+  if (!s) return '<span class="dim">never heard</span>';
+  const avail = s.available || [], sup = s.supported || [];
+  const extra = sup.filter((x) => !avail.includes(x));
+  return `<div class="pills">`
+    + avail.map((x) => `<span class="pill ok">${esc(x)}</span>`).join("")
+    + extra.map((x) => `<span class="pill dim">${esc(x)}</span>`).join("")
+    + `</div><div class="dim">available ${esc(s.available_raw || "")}`
+    + ` · supported ${esc(s.supported_raw || "")}`
+    + ` · request priority ${esc(s.request_priority)}</div>`;
+}
+
+// A neighbour this recorder decodes for itself is worth saying so: it is the
+// difference between "a site we cover" and "a site nobody here is listening to".
+function siteNeighbours(d) {
+  const list = d.adjacent_sites || [];
+  if (!list.length) return '<span class="dim">none announced</span>';
+  const mine = d.recorder_sites || [];
+  return `<table>${tableHtml(
+    ["system", "rfss-site", "lra", "control", "channel", "flags", "decoded here"],
+    list.map((a) => {
+      const own = mine.find((m) => m.system_id === a.system_id && m.rfss === a.rfss
+        && m.site === a.site);
+      const f = a.flags || {};
+      const flags = [
+        f.conventional ? "conventional" : "",
+        f.failure ? "failure" : "",
+        f.valid ? "" : "stale",
+        f.rfss_connected ? "" : "no rfss link",
+      ].filter(Boolean).join(", ");
+      return [
+        hex(a.system_id, 3), `${a.rfss}-${a.site}`, plain(a.lra),
+        a.control_frequency_hz ? mhz(a.control_frequency_hz)
+          : '<span class="dim">frequency unknown</span>',
+        plain(a.channel), flags ? `<span class="warn">${esc(flags)}</span>` : "—",
+        own ? `<span class="pill ok">${esc(own.label)}</span>` : '<span class="dim">—</span>',
+      ];
+    }))}</table>`;
+}
+
+// Busiest first, capped: a site with a hundred traffic frequencies would push
+// everything else off the screen, and the tail of that list says nothing.
+function siteTraffic(list) {
+  if (!list.length) return '<span class="dim">no grants this window</span>';
+  const sorted = [...list].sort((a, b) => (b.grants || 0) - (a.grants || 0));
+  const top = sorted.slice(0, 12);
+  const rest = sorted.length - top.length;
+  return `<table>${tableHtml(["frequency", "channel", "grants", "calls", "last seen"],
+    top.map((t) => [
+      mhz(t.frequency_hz), plain(t.channel), t.grants, t.calls,
+      `<span class="dim">${esc(t.last_seen || "")}</span>`,
+    ]))}</table>`
+    + (rest > 0 ? `<div class="dim">and ${rest} more frequenc${rest === 1 ? "y" : "ies"}</div>` : "");
+}
+
+function siteKinds(k) {
+  if (!k) return '<span class="dim">nothing counted this window</span>';
+  const top = (k.top_unknown || []).length
+    ? `<table>${tableHtml(["mfid", "opcode", "count"],
+        k.top_unknown.map((u) => [u.mfid, u.opcode, u.count]))}</table>`
+    : '<span class="dim">none recurring</span>';
+  return `<div class="pills">`
+    + `<span class="pill ok">${k.known} known</span>`
+    + `<span class="pill ${k.unknown ? "warn" : ""}">${k.unknown} unknown</span>`
+    + `<span class="pill dim">${k.noise} noise</span></div>` + top;
+}
+
+function siteUnknowns(list) {
+  if (!list.length) return '<span class="dim">nothing unaccounted for</span>';
+  return `<ul class="ulist">${list.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>`;
+}
+
+async function fetchSiteDetail(i) {
+  try {
+    const r = await fetch(`/api/sites/${i}/detail`, { headers: headers() });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      siteErr[i] = `${r.status}: ${body.error || r.statusText}`;
+      delete siteDoc[i];
+    } else {
+      siteDoc[i] = await r.json();
+      delete siteErr[i];
+    }
+  } catch (e) {
+    siteErr[i] = "failed: " + e;
+  }
+  paintSiteProfile(i);
+}
+
+// Repaint one open profile in place, rather than the whole table: the two-second
+// status poll redraws the rows often enough as it is.
+function paintSiteProfile(i) {
+  const el = document.getElementById("siteprof" + i);
+  if (el && siteOpen.has(i)) el.innerHTML = siteProfile(i);
+}
+
+document.addEventListener("click", (ev) => {
+  const chev = ev.target.closest && ev.target.closest(".chev");
+  if (chev) {
+    const i = Number(chev.dataset.site);
+    if (siteOpen.has(i)) {
+      siteOpen.delete(i);
+    } else {
+      siteOpen.add(i);
+      fetchSiteDetail(i);
+    }
+    renderSites(lastSites);
+    // The button the operator pressed was just replaced; put the focus back on
+    // its replacement so the keyboard has not lost its place.
+    const back = document.querySelector(`.chev[data-site="${i}"]`);
+    if (back) back.focus();
+    return;
+  }
+  const head = ev.target.closest && ev.target.closest(".psech");
+  if (head) {
+    const i = Number(head.dataset.site), key = head.dataset.sec;
+    secState[i + ":" + key] = !secIsOpen(i, key);
+    paintSiteProfile(i);
+    const back = document.querySelector(
+      `.psech[data-site="${i}"][data-sec="${key}"]`);
+    if (back) back.focus();
+  }
+});
+
+// Ten seconds, not two: a profile is the site's slowly-changing description,
+// and the recorder rebuilds its copy on the observations thread's own clock.
+setInterval(() => {
+  for (const i of siteOpen) fetchSiteDetail(i);
+}, 10000);
+
+// The upload hold. `spool_only` is only its boot value: keyup and this panel
+// can both move it, and `source` says who did last — which is the question an
+// operator actually has when a healthy recorder is uploading nothing.
+// The push channel's one-line health. Reconnects are shown only once there
+// have been some: a steady link should read as plainly as possible.
+function pushPill(st) {
+  if (!st.enabled) return '<span class="pill">off</span>';
+  if (!st.connected) {
+    const why = st.last_error ? ` <span class="dim">${esc(st.last_error)}</span>` : "";
+    return `<span class="pill warn">down</span>${why}`;
+  }
+  const n = st.reconnects || 0;
+  return '<span class="pill ok">connected</span>'
+    + (n ? ` <span class="dim">${esc(n)} reconnects</span>` : "");
+}
+
+function renderUplink(u) {
+  const held = !!u.spool_only;
+  lastHeld = held;
+  $("uplink").innerHTML = [
+    ["uploads", held
+      ? '<span class="pill warn">held</span>'
+      : '<span class="pill ok">live</span>'],
+    ["set by", esc(u.source || "config")],
+    ["spooled", `${esc(u.spooled_calls ?? 0)} calls · ${mib(u.spool_bytes)} MiB`],
+    ["url", esc(u.url || "—")],
+    // The keyup push channel: how quickly this recorder hears about a change.
+    // "off" is a configuration, not a fault; "down" is the one worth a badge.
+    ["push", pushPill(u.stream || {})],
+  ].map(([k, v]) => `<div><span class="dim">${esc(k)}</span> ${v}</div>`).join("")
+    + `<div><button id="holdbtn" type="button">${held ? "release uploads" : "hold uploads"}</button></div>`;
+}
+
+// The recorder-wide settings keyup can manage, and who last set each. Read
+// only: the link is edited from keyup (one writer per setting), and the hold
+// keeps its own button above.
+function renderRecorder(r) {
+  const src = (v) => `<span class="dim">(${esc(v || "config")})</span>`;
+  const on = (v) => v ? '<span class="pill ok">on</span>' : '<span class="pill">off</span>';
+  const l = r.link || {};
+  $("recorder").innerHTML = [
+    ["event-log archive", `${on(r.event_log_archive)} ${src(r.event_log_archive_source)}`],
+    ["uploads held", `${on(r.spool_only)} ${src(r.spool_only_source)}`],
+    ["link", `${on(l.enabled)} ${src(r.link_source)}`],
+    ["broadcastify", bcfyLine(r.broadcastify || {})],
+    ["skipped talkgroups", skipLine(r.skip_talkgroups || {})],
+  ].map(([k, v]) => `<div><span class="dim">${esc(k)}</span> ${v}</div>`).join("");
+  $("linkcfg").innerHTML = [
+    ["bind", esc(l.bind || "—")],
+    ["peers", esc((l.peers || []).join(", ") || "none")],
+    ["key", l.key_set ? esc(l.key_fingerprint || "set") : "not set"],
+    ["hello s", esc(l.hello_interval_s ?? "—")],
+    ["accept remote", esc(!!l.accept_remote_grants)],
+    ["publish", esc(!!l.publish_grants)],
+    ["defer to claims", esc(!!l.defer_to_claims)],
+  ].map(([k, v]) => `<div><span class="dim">${esc(k)}</span> ${v}</div>`).join("");
+}
+
+// The talkgroups this recorder refuses to tune at all, in one read-only line:
+// how many, which of them the TOML asked for, and the revision of keyup's half.
+// keyup owns its half (it is the talkgroups whose Record, Transcribe and export
+// switches the operator turned off) and the file owns the rest, so there is
+// nothing to click here either.
+function skipLine(s) {
+  const n = s.count || 0;
+  if (!n) { return '<span class="pill">none</span>'; }
+  const local = (s.local || []).length;
+  const from = local ? ` <span class="dim">${esc(local)} from config</span>` : "";
+  const rev = s.revision ? ` <span class="dim">rev ${esc(s.revision)}</span>` : "";
+  return `<span class="pill ok">${esc(n)}</span>${from}${rev}`;
+}
+
+// Direct-to-Broadcastify, in one read-only line: whether keyup has turned it
+// on, and how the calls since boot have gone. keyup owns the switch, so there
+// is nothing to click. Never the API key — the status body carries only
+// `api_key_set` and the first six characters, and only the former is shown.
+function bcfyLine(b) {
+  const on = (v) => v ? '<span class="pill ok">on</span>' : '<span class="pill">off</span>';
+  if (!b.enabled) {
+    return `${on(false)} <span class="dim">${b.allowed === false ? "refused by config" : "keyup has not enabled it"}</span>`;
+  }
+  const counts = ["uploaded", "duplicate", "failed", "late", "claim_denied", "skipped", "skipped_no_speech"]
+    .map((k) => `${k} ${b[k] || 0}`).join(" · ");
+  const last = b.last_response ? ` <span class="dim">last: ${esc(b.last_response)}</span>` : "";
+  return `${on(true)} <span class="dim">${esc(counts)}</span>${last}`;
+}
+
+// One row per peer the link has heard from, with the delivery record for the
+// grants we sent it. `unacked` climbing (or `acks` reading "no") is what a
+// one-way firewall rule looks like from this end; a stale `last hello` is what
+// a peer that has gone away looks like.
+function renderLinkPeers(l) {
+  const el = $("linkpeers");
+  if (!l.enabled) { el.innerHTML = ""; return; }
+  const peers = l.peers || [];
+  if (!peers.length) {
+    el.innerHTML = '<tbody><tr><td class="dim">no peers heard yet</td></tr></tbody>';
+    return;
+  }
+  // Every one of these is absent until the peer has been talked to, and
+  // absent is not zero: an em dash says "nothing to report" honestly.
+  const n = (v) => (v === undefined || v === null) ? "—" : esc(v);
+  const yn = (v) => (v === undefined || v === null) ? "—" : (v ? "yes" : "no");
+  table(el, ["peer", "sent", "acked", "retried", "unacked", "acks", "last hello"],
+    peers.map((p) => [
+      `${esc(p.instance || "?")} <span class="dim">${esc(p.addr)}</span>`
+        + (p.alive ? "" : ' <span class="pill warn">stale</span>'),
+      n(p.grants_sent), n(p.grants_acked), n(p.grants_retried), n(p.grants_unacked),
+      yn(p.acks_grants),
+      p.last_hello_s === undefined || p.last_hello_s === null ? "—" : dur(p.last_hello_s),
+    ]));
+}
+
+// Unit-to-unit calls, newest first, shown as "A -> B". The section stays
+// hidden until there is one: a site with no private traffic should not carry an
+// empty table forever.
+function renderPrivateCalls(rows) {
+  $("privsec").hidden = rows.length === 0;
+  if (!rows.length) return;
+  table($("privcalls"), ["radios", "channel", "started", "length", ""],
+    rows.map((r) => [
+      `${esc(r.source)} &rarr; ${esc(r.target)}`,
+      mhz(r.frequency_hz),
+      new Date(r.started_at_ms).toLocaleTimeString(),
+      r.active ? "" : dur(Math.round(((r.ended_at_ms - r.started_at_ms) || 0) / 1000)),
+      r.active ? '<span class="pill ok">on air</span>' : '<span class="dim">ended</span>',
+    ]));
+}
+
+// What the recorder is decoding. Two tables off one status field: the calls up
+// right now (elapsed ticking every second, between polls) and the last few that
+// finished. `monitorOn` gates the listen buttons — a page whose recorder is not
+// serving audio should not offer a control that can only fail.
+let lastCalls = { active: [], recent: [] };
+let monitorOn = false;
+
+// Talkgroup, alias and radio in the one cell each table wants: the talkgroup is
+// what an operator recognises, the alias is what the radio calls itself, and a
+// unit call has no talkgroup at all and shows the pair instead.
+function callWho(r) {
+  if (r.talkgroup === null || r.talkgroup === undefined) {
+    const to = (r.target === null || r.target === undefined) ? "?" : r.target;
+    return `<span class="dim">${esc(r.kind)}</span> ${esc(r.source)} &rarr; ${esc(to)}`;
+  }
+  const alias = r.alias ? ` <span class="dim">${esc(r.alias)}</span>` : "";
+  return `${esc(r.talkgroup)}${alias}`;
+}
+
+// A listen button for one row. A group call can be filtered to its talkgroup;
+// a unit call carries no talkgroup on the monitor's own metadata, so the button
+// falls back to the unfiltered stream rather than filtering to nothing.
+function listenBtn(r) {
+  if (!monitorOn) return "";
+  const tg = (r.talkgroup === null || r.talkgroup === undefined) ? "" : r.talkgroup;
+  return `<button type="button" class="listenbtn" data-tg="${esc(tg)}">listen</button>`;
+}
+
+function renderCalls(calls) {
+  lastCalls = { active: calls.active || [], recent: calls.recent || [] };
+  renderOnAir();
+  const rows = lastCalls.recent;
+  if (!rows.length) {
+    $("recentcalls").innerHTML = '<tbody><tr><td class="dim">no calls yet</td></tr></tbody>';
+    return;
+  }
+  table($("recentcalls"), ["started", "talkgroup", "radio", "length", "outcome", ""],
+    rows.map((r) => [
+      new Date(r.started_at_ms).toLocaleTimeString(),
+      callWho(r),
+      esc(r.source || "—"),
+      dur(Math.round(((r.ended_at_ms - r.started_at_ms) || 0) / 1000)),
+      outcomeCell(r),
+      listenBtn(r),
+    ]));
+}
+
+// What this recorder did with the call. `delivered` means handed to the uplink
+// thread — what keyup then said about it is the Uplink counters' business, not
+// this row's.
+function outcomeCell(r) {
+  const o = r.outcome;
+  if (!o) return `<span class="dim">${esc(r.reason || "—")}</span>`;
+  const cls = o === "delivered" ? "ok" : "";
+  return `<span class="pill ${cls}">${esc(o)}</span>`;
+}
+
+// Redrawn once a second so the elapsed column ticks between the two-second
+// polls; the rows themselves only change when a poll brings new ones.
+function renderOnAir() {
+  const rows = lastCalls.active;
+  if (!rows.length) {
+    $("onair").innerHTML = '<tbody><tr><td class="dim">nothing on air</td></tr></tbody>';
+    return;
+  }
+  const now = Date.now();
+  table($("onair"), ["talkgroup", "radio", "channel", "site", "elapsed", ""],
+    rows.map((r) => [
+      callWho(r) + (r.encrypted ? ' <span class="pill warn">encrypted</span>' : ""),
+      esc(r.source || "—"),
+      mhz(r.frequency_hz),
+      esc(r.site || ""),
+      dur(Math.round((now - r.started_at_ms) / 1000)),
+      listenBtn(r),
+    ]));
+}
+
+setInterval(renderOnAir, 1000);
+
+// The live monitor. The card only exists when the recorder says it is serving
+// audio: an operator who cannot listen should not be shown a player that will
+// only ever 404 at them.
+function renderMonitor(m) {
+  const on = !!m.enabled;
+  // Read by the Activity tables, which only offer a listen button when there
+  // is something to listen to.
+  monitorOn = on;
+  $("monsec").hidden = !on;
+  if (!on) return;
+  const mine = $("monaudio").src ? 1 : 0;
+  $("monmsg").textContent = `${m.streams ?? 0} of ${m.max_streams ?? 0} streams in use`
+    + (mine && m.dropped_frames ? ` · ${m.dropped_frames} frames dropped` : "");
+}
+
+// The player URL. The token rides the query string because an <audio> element
+// has no way to send a header; the recorder accepts it there for this one
+// read-only route.
+function monitorUrl() {
+  const q = new URLSearchParams();
+  if ($("monfilter").value === "tg") {
+    const tg = $("montg").value.trim();
+    if (!tg) return null;
+    q.set("talkgroup", tg);
+  }
+  const t = tokenBox.value.trim();
+  if (t) q.set("token", t);
+  const s = q.toString();
+  return "/api/monitor/stream" + (s ? "?" + s : "");
+}
+
+$("monfilter").addEventListener("change", () => {
+  $("montg").hidden = $("monfilter").value !== "tg";
+});
+
+function startMonitor() {
+  const url = monitorUrl();
+  if (!url) { $("monmsg").textContent = "enter a talkgroup"; return; }
+  const el = $("monaudio");
+  // A fresh URL every time: the media stack will happily replay a cached
+  // response, and a live stream re-fetched from cache is a stream that never
+  // starts.
+  el.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+  el.play().catch((e) => { $("monmsg").textContent = "cannot play: " + e; });
+}
+
+$("monbtn").addEventListener("click", startMonitor);
+
+// A listen button on an Activity row is the monitor controls, driven from here:
+// it sets the same two inputs an operator would set by hand and then starts the
+// one player the page has.
+document.addEventListener("click", (ev) => {
+  const btn = ev.target.closest && ev.target.closest(".listenbtn");
+  if (!btn) return;
+  const tg = btn.dataset.tg;
+  $("monfilter").value = tg ? "tg" : "";
+  $("montg").hidden = !tg;
+  if (tg) $("montg").value = tg;
+  startMonitor();
+});
+
+$("monstop").addEventListener("click", () => {
+  const el = $("monaudio");
+  el.pause();
+  // Clearing the source is what actually closes the connection, and closing
+  // the connection is what frees the recorder's stream slot.
+  el.removeAttribute("src");
+  el.load();
+});
+
+function render(s) {
+  $("instance").textContent = s.instance_id;
+  $("version").textContent = "v" + s.recorder_version;
+  $("uptime").textContent = "up " + dur(s.uptime_s);
+  const st = s.station || {};
+  $("station").textContent = [st.name, st.location].filter(Boolean).join(" · ");
+
+  const c = s.counters || {};
+  $("counters").innerHTML = [
+    ["calls started", c.calls_started], ["ended", c.calls_ended],
+    ["no voice", c.calls_discarded_empty], ["phase 2 refused", c.calls_tdma_refused ?? 0],
+    ["uploaded", c.uploaded],
+    ["spooled", c.spooled], ["failed", c.failed],
+    ["spool MiB", mib(c.spool_bytes)], ["disk free MiB", mib(c.disk_free_bytes)],
+    ["unit calls", `${c.unit_calls_started ?? 0} / ${c.unit_calls_ended ?? 0}`],
+  ].map(([k, v]) => `<div><span class="dim">${esc(k)}</span> ${esc(v)}</div>`).join("");
+
+  renderPrivateCalls(s.private_calls || []);
+  renderMonitor(s.monitor || {});
+  // After the monitor, so the listen buttons know whether they exist.
+  renderCalls(s.calls || {});
+
+  renderUplink(s.uplink || {});
+  renderRecorder(s.recorder || {});
+  renderLinkPeers(s.link || {});
+
+  const byUnit = {};
+  for (const u of s.supervisor || []) byUnit[u.name] = u;
+  $("tuners").innerHTML = (s.tuners || [])
+    .map((t) => tunerCard(t, byUnit["device:" + t.tuner_key] || byUnit[t.tuner_key]))
+    .join("") || '<div class="card dim">no tuners</div>';
+
+  lastSites = s.sites || [];
+  renderSites(lastSites);
+
+  table($("supervisor"), ["unit", "state", "restarts", "heartbeat"],
+    (s.supervisor || []).map((u) => [
+      esc(u.name), `<span class="pill ${stateClass(u.state)}">${esc(u.state)}</span>`,
+      u.restart_count, (u.heartbeat_age_ms / 1000).toFixed(1) + "s",
+    ]));
+
+  // The file on disk versus the recorder in memory. `applySticky` covers the
+  // second or two between a write landing and the next poll agreeing.
+  if (s.config_path) lastConfigPath = s.config_path;
+  setApply(!!s.restart_pending || applySticky);
+  if (reloadingUntil && Date.now() - reloadStartedAt > 2500) {
+    reloadingUntil = 0;
+    $("applymsg").textContent = "";
+  }
+
+  $("tick").textContent = new Date().toLocaleTimeString();
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/status", { headers: headers() });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      banner(`${r.status}: ${body.error || r.statusText}`);
+      return;
+    }
+    banner("");
+    render(await r.json());
+  } catch (e) {
+    banner(Date.now() < reloadingUntil
+      ? "reloading the configuration — waiting for the recorder…"
+      : "cannot reach the recorder: " + e);
+  }
+}
+
+// Releasing starts uploads — a spool that has been filling for a week goes out
+// the moment this lands — so that direction asks first. Holding does not: it
+// only ever stops traffic, and an operator reaching for it is usually in a
+// hurry.
+let lastHeld = false;
+
+document.addEventListener("click", async (ev) => {
+  if (ev.target.id === "holdbtn") {
+    const want = !lastHeld;
+    if (!want && !confirm(
+      "Release the hold? Everything in the spool will start uploading to keyup now.")) {
+      return;
+    }
+    const msg = $("uplinkmsg");
+    ev.target.disabled = true;
+    msg.textContent = want ? "holding…" : "releasing…";
+    msg.className = "msg dim";
+    try {
+      const r = await fetch("/api/uplink", {
+        method: "POST",
+        headers: { ...headers(), "Content-Type": "application/json" },
+        body: JSON.stringify({ spool_only: want }),
+      });
+      const body = await r.json().catch(() => ({}));
+      msg.textContent = r.ok
+        ? (body.spool_only ? "uploads held" : "uploads released")
+        : `${r.status}: ${body.error || r.statusText}`;
+      msg.className = r.ok ? "msg ok" : "msg bad";
+    } catch (e) {
+      msg.textContent = "failed: " + e;
+      msg.className = "msg bad";
+    }
+    refresh();
+    return;
+  }
+  const key = ev.target.getAttribute && ev.target.getAttribute("data-restart");
+  if (!key) return;
+  const msg = document.querySelector(`[data-msg="${CSS.escape(key)}"]`);
+  ev.target.disabled = true;
+  msg.textContent = "restarting…";
+  msg.className = "msg dim";
+  try {
+    const r = await fetch(`/api/tuners/${encodeURIComponent(key)}/restart`,
+      { method: "POST", headers: headers() });
+    const body = await r.json().catch(() => ({}));
+    msg.textContent = r.ok ? "restart requested" : `${r.status}: ${body.error || r.statusText}`;
+    msg.className = r.ok ? "msg ok" : "msg bad";
+  } catch (e) {
+    msg.textContent = "failed: " + e;
+    msg.className = "msg bad";
+  }
+  ev.target.disabled = false;
+  refresh();
+});
+
+$("cfgbtn").addEventListener("click", async () => {
+  const sec = $("cfgsec");
+  if (!sec.hidden) { sec.hidden = true; return; }
+  const r = await fetch("/api/config", { headers: headers() });
+  const body = await r.json().catch(() => ({}));
+  $("cfg").textContent = r.ok
+    ? JSON.stringify(body, null, 2)
+    : `${r.status}: ${body.error || r.statusText}`;
+  sec.hidden = false;
+});
+
+
+// ---------------------------------------------------------------- devices
+//
+// Device setup: what the box has plugged in, what the config file says about
+// it, and an editor between the two. Deliberately *not* on the 2 s status
+// poll — discover and the config read happen when the section is opened and
+// after a write, so a half-typed centre frequency is never re-rendered out
+// from under the operator.
+//
+// Everything here writes the file on disk, not the running recorder. That is
+// why the yellow bar exists: saving and applying are two separate acts, and
+// an operator who has done the first is owed a visible reminder of the second.
+
+// Fields the editor has no box for but must not silently drop when it saves a
+// device it loaded. A PUT replaces the whole `[[device]]`, so these ride along
+// unchanged.
+const DEV_KEEP = ["pacing", "portapack_port", "restore_portapack_on_exit",
+                  "site", "remote_grants", "height_m"];
+
+let devDiscover = null;      // GET /api/devices/discover
+let devConfig = null;        // GET /api/config/devices
+let devEdit = null;          // { id, isNew, orig } while the editor is open
+let devMissing = false;      // the routes 404: an older binary
+let applySticky = false;     // a write landed; hold the bar until a reload
+let lastConfigPath = null;
+let reloadingUntil = 0;      // quiet the "cannot reach" banner across a reload
+let reloadStartedAt = 0;
+
+// One shape for every device call: the parsed body, the status, and the
+// message the backend wants shown, which is always `error` when there is one.
+async function devFetch(path, opts) {
+  const o = opts || {};
+  const h = { ...headers() };
+  if (o.body) h["Content-Type"] = "application/json";
+  const r = await fetch(path, { ...o, headers: h });
+  const body = await r.json().catch(() => ({}));
+  return { ok: r.ok, status: r.status, body, why: body.error || r.statusText };
+}
+
+function setApply(on) {
+  $("applybar").className = on ? "on" : "";
+  if (!on) $("applymsg").textContent = "";
+}
+
+function devMsg(text, cls) {
+  const m = $("devmsg");
+  m.textContent = text || "";
+  m.className = "msg" + (cls ? " " + cls : "");
+}
+
+async function devLoad() {
+  devMsg("loading…", "dim");
+  let d, c;
+  try {
+    [d, c] = await Promise.all([
+      devFetch("/api/devices/discover"),
+      devFetch("/api/config/devices"),
+    ]);
+  } catch (e) {
+    devMsg("failed: " + e, "bad");
+    return;
+  }
+  // An older recorder has none of these routes. Say so inside the section
+  // rather than leaving a broken half-table on an otherwise working page.
+  if (d.status === 404 || c.status === 404) {
+    devMissing = true;
+    $("devunavail").hidden = false;
+    $("devbody").hidden = true;
+    return;
+  }
+  devMissing = false;
+  $("devunavail").hidden = true;
+  $("devbody").hidden = false;
+  if (!d.ok || !c.ok) {
+    const bad = d.ok ? c : d;
+    devMsg(`${bad.status}: ${bad.why}`, "bad");
+    return;
+  }
+  devMsg("");
+  devDiscover = d.body;
+  devConfig = c.body;
+  if (d.body.restart_pending) setApply(true);
+  renderDevices();
+}
+
+// `running` is the only one of these the recorder can be wrong about in the
+// operator's favour, so it is the one that gets the green.
+function hwStatus(h) {
+  if (h.running) return '<span class="pill ok">running</span>';
+  if (h.configured_id) return '<span class="pill">configured</span>';
+  return '<span class="pill dim">free</span>';
+}
+
+function renderDevices() {
+  const d = devDiscover || {}, c = devConfig || {};
+  const byId = {};
+  for (const dev of c.devices || []) byId[dev.id] = dev;
+
+  const path = d.config_path || lastConfigPath;
+  $("devpath").innerHTML = "config " + esc(path || "—")
+    + (d.writable === false ? ' <span class="pill warn">read-only</span>' : "");
+
+  const rows = [];
+  (d.hardware || []).forEach((h, i) => {
+    rows.push([
+      esc(h.label || h.key || "?")
+        + (h.args ? ` <span class="dim">${esc(h.args)}</span>` : ""),
+      esc(h.driver || h.backend || "—"),
+      esc(h.serial || "—"),
+      hwStatus(h),
+      h.configured_id ? esc(h.configured_id) : '<span class="dim">—</span>',
+      h.configured_id
+        ? `<button type="button" data-devedit="${esc(h.configured_id)}">Edit…</button>`
+        : `<button type="button" data-devadd="${i}">Add…</button>`,
+    ]);
+  });
+  // A configured device whose board is not on the bus: unplugged, or held by
+  // another program that got there first. Either way it is still config the
+  // operator owns and can edit, so it belongs in the same table.
+  for (const cf of d.configured || []) {
+    if (cf.present) continue;
+    const dev = byId[cf.id] || {};
+    rows.push([
+      `<span class="dim">${esc(dev.receiver || dev.driver || dev.backend || cf.id)}</span>`,
+      esc(dev.driver || dev.backend || "—"),
+      esc(dev.serial || "—"),
+      '<span class="pill warn">not present</span>'
+        + ' <span class="dim">unplugged, or held by another program</span>',
+      esc(cf.id),
+      `<button type="button" data-devedit="${esc(cf.id)}">Edit…</button>`,
+    ]);
+  }
+  table($("devhw"),
+    ["Board", "Driver", "Serial", "Status", "Configured as", "Action"], rows);
+  if (!rows.length) {
+    $("devhw").innerHTML =
+      '<tbody><tr><td class="dim">no hardware found and nothing configured</td></tr></tbody>';
+  }
+
+  table($("devcfg"),
+    ["id", "driver/backend", "serial", "sample rate", "centre", "role", "bands", "sites", ""],
+    (c.devices || []).map((x) => [
+      esc(x.id),
+      esc(x.driver || x.soapy || x.backend || "soapy"),
+      esc(x.serial || "—"),
+      esc(x.sample_rate ?? "—"),
+      mhz(x.center_frequency),
+      esc(x.role || "auto"),
+      esc((x.bands || []).join(", ") || "—"),
+      esc((x.sites || []).join(", ") || "—"),
+      `<button type="button" data-devedit="${esc(x.id)}">Edit…</button>`,
+    ]));
+}
+
+// -- the editor ---------------------------------------------------------
+
+function edRow(label, html, help) {
+  return `<label class="f">${esc(label)}</label><div>${html}`
+    + (help ? ` <span class="dim">${esc(help)}</span>` : "") + "</div>";
+}
+
+function kvRow(k, v) {
+  return '<div class="kvrow row">'
+    + `<input type="text" value="${esc(k ?? "")}" placeholder="name">`
+    + `<input type="text" value="${esc(v ?? "")}" placeholder="value">`
+    + '<button type="button" data-kvdel="1">remove</button></div>';
+}
+
+function kvRows(obj) {
+  return Object.entries(obj || {}).map(([k, v]) => kvRow(k, v)).join("");
+}
+
+function kvRead(id, numeric) {
+  const out = {};
+  for (const row of document.querySelectorAll(`#${id} .kvrow`)) {
+    const ins = row.querySelectorAll("input");
+    const k = ins[0].value.trim(), v = ins[1].value.trim();
+    if (!k || v === "") continue;
+    const n = Number(v);
+    out[k] = (numeric && Number.isFinite(n)) ? n : v;
+  }
+  return out;
+}
+
+// A tri-state box: unset (omitted from the save, so the driver's own default
+// stands), true, false. Clicking cycles; the word beside it says which,
+// because an indeterminate checkbox on its own just reads as "off".
+function applyTri(el, state) {
+  if (!el) return;
+  el.dataset.state = state;
+  el.indeterminate = state === "unset";
+  el.checked = state === "true";
+  const t = $(el.id + "_t");
+  if (t) t.textContent = state;
+}
+
+function cycleTri(el) {
+  const cur = el.dataset.state || "unset";
+  applyTri(el, cur === "unset" ? "true" : cur === "true" ? "false" : "unset");
+}
+
+function triValue(id) {
+  const el = $("ed_" + id);
+  if (!el) return undefined;
+  const s = el.dataset.state || "unset";
+  return s === "unset" ? undefined : s === "true";
+}
+
+function siteBoxes(sites, chosen) {
+  const has = new Set(chosen || []);
+  if (!sites.length) return '<span class="dim">no sites configured</span>';
+  return sites.map((s) => {
+    const label = `${s.system}/${s.site}`;
+    return `<label><input type="checkbox" data-site="${esc(label)}"`
+      + `${has.has(label) ? " checked" : ""}> ${esc(label)}`
+      + (s.enabled === false ? ' <span class="dim">(disabled)</span>' : "") + "</label>";
+  }).join("");
+}
+
+function closeEditor() {
+  devEdit = null;
+  $("deveditor").innerHTML = "";
+}
+
+function openEditor(dev, isNew) {
+  dev = dev || {};
+  devEdit = { id: dev.id || "", isNew: !!isNew, orig: dev };
+  const backend = dev.backend || "soapy";
+  const sites = (devConfig && devConfig.sites) || [];
+  const sel = (id, opts, cur) => `<select id="ed_${id}">`
+    + opts.map((o) => `<option value="${o}"${o === cur ? " selected" : ""}>${o}</option>`).join("")
+    + "</select>";
+  const txt = (id, v, ph) => `<input id="ed_${id}" type="text" value="${esc(v ?? "")}"`
+    + (ph ? ` placeholder="${esc(ph)}"` : "") + ">";
+  const numf = (id, v, step) => `<input id="ed_${id}" class="num" type="number"`
+    + (step ? ` step="${step}"` : "")
+    + ` value="${v === null || v === undefined ? "" : esc(v)}">`;
+  const trib = (id) => `<span class="row"><input id="ed_${id}" type="checkbox" data-tri="1">`
+    + `<span id="ed_${id}_t" class="dim">unset</span></span>`;
+
+  $("deveditor").innerHTML = `<div class="edit">
+    <h3>${isNew ? "Add device" : "Edit device " + esc(dev.id || "")}</h3>
+    <div class="grid">
+      ${edRow("id", `<input id="ed_id" type="text" value="${esc(dev.id || "")}"${isNew ? "" : " readonly"}>`,
+              isNew ? "required; sites reference this" : "immutable")}
+      ${edRow("backend", sel("backend", ["soapy", "hackrf", "iqfile"], backend))}
+      ${edRow("driver", txt("driver", dev.driver, "airspy, sdrplay, rtlsdr"))}
+      ${edRow("serial", txt("serial", dev.serial))}
+      ${edRow("soapy args", txt("soapy", dev.soapy, "driver=airspy,serial=…"), "wins over driver")}
+      ${edRow("sample_rate", numf("sample_rate", dev.sample_rate), "samples/s")}
+      ${edRow("center_frequency", numf("center_frequency", dev.center_frequency)
+              + ' <span id="ed_center_mhz" class="dim"></span>', "Hz")}
+      ${edRow("bandwidth_hz", numf("bandwidth_hz", dev.bandwidth_hz), "optional analog filter")}
+      ${edRow("rx_port", txt("rx_port", dev.rx_port, "Antenna B"), "optional")}
+      ${edRow("gain", numf("gain", dev.gain, "any"), "dB, optional")}
+      ${edRow("gains", '<div id="ed_gains"></div><button type="button" id="ed_gains_add">add gain</button>',
+              "per element: LNA, MIX, VGA, IFGR…")}
+      ${edRow("agc", trib("agc"), "unset leaves the driver default")}
+      ${edRow("ppm", numf("ppm", dev.ppm, "any"))}
+      ${edRow("auto_ppm", `<input id="ed_auto_ppm" type="checkbox"${dev.auto_ppm === false ? "" : " checked"}>`,
+              "correct the tuner while it runs")}
+      ${edRow("auto_ppm_limit", numf("auto_ppm_limit", dev.auto_ppm_limit, "any"), "ppm ceiling")}
+      ${edRow("ring_seconds", numf("ring_seconds", dev.ring_seconds, "any"))}
+      ${edRow("role", sel("role", ["auto", "control", "voice", "data"], dev.role || "auto"))}
+      ${edRow("bands", txt("bands", (dev.bands || []).join(", "), "700, 800"),
+              "comma separated: vhf, uhf, 700, 800, 900 — or lo-hi in Hz")}
+      ${edRow("receiver", txt("receiver", dev.receiver, "Airspy R2"))}
+      ${edRow("antenna", txt("antenna", dev.antenna, "Diamond X50 @ 8m"))}
+      ${edRow("cable", txt("cable", dev.cable, "25 m LMR-400"))}
+      ${edRow("amplifier", txt("amplifier", dev.amplifier), "prose; not the HackRF amp")}
+      ${edRow("notes", `<textarea id="ed_notes">${esc(dev.notes || "")}</textarea>`)}
+      ${edRow("settings", '<div id="ed_settings"></div><button type="button" id="ed_settings_add">add setting</button>',
+              "driver writeSetting key/value")}
+    </div>
+    <div id="ed_hackrf" class="grid" hidden>
+      ${edRow("lna_db", numf("lna_db", dev.lna_db), "0–40 in 8 dB steps")}
+      ${edRow("vga_db", numf("vga_db", dev.vga_db), "0–62 in 2 dB steps")}
+      ${edRow("amp", trib("amp"), "HackRF +14 dB front end")}
+    </div>
+    <div id="ed_iqfile" class="grid" hidden>
+      ${edRow("path", txt("path", dev.path, "/path/to/capture.iq"))}
+    </div>
+    <h3>Sites</h3>
+    <div id="ed_sites" class="sitebox">${siteBoxes(sites, dev.sites)}</div>
+    <div class="row" style="margin-top:10px">
+      <button type="button" id="ed_save">Save</button>
+      ${isNew ? "" : '<button type="button" id="ed_delete">Delete</button>'}
+      <button type="button" id="ed_cancel">Cancel</button>
+    </div>
+    <div class="msg" id="ed_msg"></div>
+  </div>`;
+
+  $("ed_gains").innerHTML = kvRows(dev.gains);
+  $("ed_settings").innerHTML = kvRows(dev.settings);
+  applyTri($("ed_agc"), dev.agc === true ? "true" : dev.agc === false ? "false" : "unset");
+  applyTri($("ed_amp"), dev.amp === true ? "true" : dev.amp === false ? "false" : "unset");
+  $("ed_backend").addEventListener("change", edBackend);
+  $("ed_center_frequency").addEventListener("input", edMhz);
+  edBackend();
+  edMhz();
+  $("deveditor").scrollIntoView({ block: "nearest" });
+}
+
+function edBackend() {
+  const b = $("ed_backend").value;
+  $("ed_hackrf").hidden = b !== "hackrf";
+  $("ed_iqfile").hidden = b !== "iqfile";
+}
+
+// Hz is what the file wants and MHz is what the operator knows the site by;
+// showing both as it is typed is cheaper than an off-by-a-thousand.
+function edMhz() {
+  const v = $("ed_center_frequency").value.trim();
+  const n = Number(v);
+  $("ed_center_mhz").textContent =
+    (v === "" || !Number.isFinite(n)) ? "" : (n / 1e6).toFixed(4) + " MHz";
+}
+
+function edMsg(text, cls) {
+  const m = $("ed_msg");
+  if (!m) return;
+  m.textContent = text || "";
+  m.className = "msg" + (cls ? " " + cls : "");
+}
+
+// Only what the operator actually set. An empty box is not "" — it is a field
+// this device does not have, and sending "" would write one.
+function editorBody() {
+  const body = {};
+  const orig = (devEdit && devEdit.orig) || {};
+  for (const k of DEV_KEEP) {
+    if (orig[k] !== undefined && orig[k] !== null) body[k] = orig[k];
+  }
+  const str = (k) => {
+    const el = $("ed_" + k);
+    const v = el ? el.value.trim() : "";
+    if (v) body[k] = v;
+  };
+  const numv = (k) => {
+    const el = $("ed_" + k);
+    const v = el ? el.value.trim() : "";
+    if (v === "") return;
+    const n = Number(v);
+    if (Number.isFinite(n)) body[k] = n;
+  };
+
+  body.id = $("ed_id").value.trim();
+  body.backend = $("ed_backend").value;
+  for (const k of ["driver", "serial", "soapy", "rx_port",
+                   "receiver", "antenna", "cable", "amplifier", "notes"]) str(k);
+  for (const k of ["sample_rate", "center_frequency", "bandwidth_hz",
+                   "gain", "ppm", "auto_ppm_limit", "ring_seconds"]) numv(k);
+  if (body.backend === "hackrf") {
+    numv("lna_db");
+    numv("vga_db");
+    const amp = triValue("amp");
+    if (amp !== undefined) body.amp = amp;
+  }
+  if (body.backend === "iqfile") str("path");
+  const agc = triValue("agc");
+  if (agc !== undefined) body.agc = agc;
+  body.auto_ppm = $("ed_auto_ppm").checked;
+  body.role = $("ed_role").value;
+
+  const bands = $("ed_bands").value.split(",").map((x) => x.trim()).filter(Boolean);
+  if (bands.length) body.bands = bands;
+  const gains = kvRead("ed_gains", true);
+  if (Object.keys(gains).length) body.gains = gains;
+  const settings = kvRead("ed_settings", false);
+  if (Object.keys(settings).length) body.settings = settings;
+
+  // The backend merges: a key left out keeps its file value, so a box the
+  // operator emptied has to go up as null to be removed rather than kept.
+  const isSet = (v) => v !== undefined && v !== null
+    && !(Array.isArray(v) && v.length === 0)
+    && !(typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0);
+  for (const k of ["driver", "serial", "soapy", "rx_port", "receiver", "antenna",
+                   "cable", "amplifier", "notes", "path", "sample_rate",
+                   "center_frequency", "bandwidth_hz", "gain", "ppm",
+                   "auto_ppm_limit", "ring_seconds", "lna_db", "vga_db", "amp",
+                   "agc", "bands", "gains", "settings"]) {
+    if (isSet(orig[k]) && body[k] === undefined) body[k] = null;
+  }
+
+  // Always sent, empty included: unchecking every site is a real edit.
+  body.sites = [...document.querySelectorAll("#ed_sites input[data-site]")]
+    .filter((x) => x.checked).map((x) => x.getAttribute("data-site"));
+  return body;
+}
+
+async function devSave() {
+  const body = editorBody();
+  if (!body.id) { edMsg("id is required", "bad"); return; }
+  $("ed_save").disabled = true;
+  edMsg("saving…", "dim");
+  try {
+    const r = await devFetch(`/api/config/devices/${encodeURIComponent(body.id)}`,
+      { method: "PUT", body: JSON.stringify(body) });
+    if (!r.ok) {
+      edMsg(`${r.status}: ${r.why}`, "bad");
+      $("ed_save").disabled = false;
+      return;
+    }
+    applySticky = true;
+    setApply(true);
+    closeEditor();
+    await devLoad();
+    devMsg(`saved ${body.id} to the config file — Apply to load it`, "ok");
+  } catch (e) {
+    edMsg("failed: " + e, "bad");
+    const b = $("ed_save");
+    if (b) b.disabled = false;
+  }
+}
+
+async function devDelete() {
+  const id = devEdit && devEdit.id;
+  if (!id) return;
+  if (!confirm(`Delete device "${id}" from the config file?`)) return;
+  $("ed_delete").disabled = true;
+  edMsg("deleting…", "dim");
+  try {
+    const r = await devFetch(`/api/config/devices/${encodeURIComponent(id)}`,
+      { method: "DELETE" });
+    if (!r.ok) {
+      // 409 is the interesting one: a site still names this device. The
+      // backend knows which, so show what it said, word for word.
+      edMsg(`${r.status}: ${r.why}`, "bad");
+      $("ed_delete").disabled = false;
+      return;
+    }
+    applySticky = true;
+    setApply(true);
+    closeEditor();
+    await devLoad();
+    devMsg(`deleted ${id} from the config file — Apply to load it`, "ok");
+  } catch (e) {
+    edMsg("failed: " + e, "bad");
+    const b = $("ed_delete");
+    if (b) b.disabled = false;
+  }
+}
+
+$("devbtn").addEventListener("click", () => {
+  const sec = $("devsec");
+  if (!sec.hidden) { sec.hidden = true; return; }
+  sec.hidden = false;
+  devLoad();
+});
+
+// Applying reloads the file on disk, which takes the tuners down and brings
+// them back. The status poll will throw for a few seconds afterwards;
+// `reloadingUntil` is what keeps that from reading as a dead recorder.
+$("applybtn").addEventListener("click", async () => {
+  const btn = $("applybtn"), m = $("applymsg");
+  btn.disabled = true;
+  m.textContent = "reloading…";
+  try {
+    const r = await fetch("/api/config/reload", { method: "POST", headers: headers() });
+    const b = await r.json().catch(() => ({}));
+    if (r.ok) {
+      applySticky = false;
+      reloadStartedAt = Date.now();
+      reloadingUntil = reloadStartedAt + 30000;
+      m.textContent = "reloading…";
+      setTimeout(() => { if (!$("devsec").hidden && !devMissing) devLoad(); }, 3000);
+    } else {
+      // 422 means the file on disk will not parse. Nothing has been applied,
+      // and the operator needs the reason exactly as it was written.
+      m.textContent = `${r.status}: ${b.error || r.statusText}`;
+    }
+  } catch (e) {
+    // The recorder can drop this connection while it restarts. That is the
+    // reload working, not a failure worth shouting about.
+    reloadStartedAt = Date.now();
+    reloadingUntil = reloadStartedAt + 30000;
+    m.textContent = "reloading…";
+  }
+  btn.disabled = false;
+});
+
+document.addEventListener("click", (ev) => {
+  const t = ev.target;
+  if (!t || !t.getAttribute) return;
+  const add = t.getAttribute("data-devadd");
+  if (add !== null) {
+    const h = ((devDiscover || {}).hardware || [])[Number(add)];
+    if (!h) return;
+    const s = Object.assign({}, h.suggested || {});
+    if (!s.backend && h.backend) s.backend = h.backend;
+    if (!s.driver && h.driver) s.driver = h.driver;
+    if (!s.serial && h.serial) s.serial = h.serial;
+    openEditor(s, true);
+    return;
+  }
+  const id = t.getAttribute("data-devedit");
+  if (id !== null) {
+    const dev = ((devConfig || {}).devices || []).find((x) => x.id === id);
+    if (!dev) { devMsg(`no device "${id}" in the config file`, "bad"); return; }
+    openEditor(dev, false);
+    return;
+  }
+  if (t.getAttribute("data-kvdel") !== null) {
+    const row = t.closest(".kvrow");
+    if (row) row.remove();
+    return;
+  }
+  if (t.id === "ed_gains_add") { $("ed_gains").insertAdjacentHTML("beforeend", kvRow("", "")); return; }
+  if (t.id === "ed_settings_add") { $("ed_settings").insertAdjacentHTML("beforeend", kvRow("", "")); return; }
+  if (t.id === "ed_cancel") { closeEditor(); return; }
+  if (t.id === "ed_save") { devSave(); return; }
+  if (t.id === "ed_delete") { devDelete(); return; }
+});
+
+document.addEventListener("change", (ev) => {
+  const t = ev.target;
+  if (t && t.getAttribute && t.getAttribute("data-tri") !== null) cycleTri(t);
+});
+
+refresh();
+setInterval(refresh, 2000);
+</script>

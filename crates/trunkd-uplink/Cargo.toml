@@ -1,0 +1,24 @@
+[package]
+name = "trunkd-uplink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Delivery of finished trunkd calls to Keyup over the Rdio-Scanner multipart upload contract, with a bounded offline spool."
+
+[dependencies]
+trunkd-core.workspace = true
+trunkd-call = { path = "../trunkd-call" }
+crossbeam-channel.workspace = true
+serde_json = "1"
+time.workspace = true
+tracing.workspace = true
+ureq = "3"
+
+# Free space on the volume the spool lives on (statvfs).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -1,0 +1,59 @@
+# trunkd as a system service. See scripts/systemd/README.md for the install
+# steps (user, groups, config directory) this unit expects.
+[Unit]
+Description=trunkd P25 trunked-radio recorder
+Documentation=https://github.com/pwsh/trunkd
+# Keyup is reached over the network; trunkd spools calls while it is away, so
+# this orders the start rather than requiring a working uplink.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=trunkd
+Group=trunkd
+# plugdev: USB access to the SDR under the usual udev rules (scripts/udev/).
+# dialout: the PortaPack's serial console ([[device]] portapack_port).
+SupplementaryGroups=plugdev dialout
+
+ExecStart=/usr/local/bin/trunkd --config /etc/trunkd/trunkd.toml
+# trunkd shuts down cleanly (closes calls, flushes the spool) on SIGINT.
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# Relative paths in trunkd.toml (spool_path, event_log_dir, the ppm memory)
+# resolve against the working directory: /var/lib/trunkd, created and owned
+# by the service user.
+StateDirectory=trunkd
+WorkingDirectory=/var/lib/trunkd
+# Logs go to the journal (console logging is always on): journalctl -u trunkd.
+
+# CAP_SYS_NICE lets the DSP thread take SCHED_FIFO so a busy box cannot starve
+# it. Nothing else is granted; without it trunkd still runs, at normal priority.
+AmbientCapabilities=CAP_SYS_NICE
+CapabilityBoundingSet=CAP_SYS_NICE
+NoNewPrivileges=true
+
+# Hardening. The SDR needs real /dev nodes (USB, serial), so no PrivateDevices.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# The local panel can edit [[device]]/[[site]] tables of trunkd.toml in place
+# (atomic rename beside the file), so the config directory stays writable.
+ReadWritePaths=/etc/trunkd
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

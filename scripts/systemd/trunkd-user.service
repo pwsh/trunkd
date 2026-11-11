@@ -1,0 +1,35 @@
+# trunkd as a systemd *user* service: runs as you, from a directory you own,
+# with no system account. See scripts/systemd/README.md.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user ~/.config/trunkd ~/.local/state/trunkd
+#   cp trunkd.example.toml ~/.config/trunkd/trunkd.toml   # then edit it
+#   cp scripts/systemd/trunkd-user.service ~/.config/systemd/user/trunkd.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trunkd
+#   sudo loginctl enable-linger "$USER"   # keep it running after you log out
+#
+# A user unit cannot grant capabilities, so real-time scheduling for the DSP
+# thread comes from the binary itself: run scripts/grant-rt.sh (setcap
+# cap_sys_nice+ep) after every build, or the recorder logs one line and runs
+# at normal priority.
+[Unit]
+Description=trunkd P25 trunked-radio recorder (user service)
+Documentation=https://github.com/pwsh/trunkd
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# %h is your home directory. Point ExecStart at a built checkout instead
+# (e.g. %h/src/trunkd/target/release/trunkd) if you do not install the binary.
+ExecStart=%h/.local/bin/trunkd --config %h/.config/trunkd/trunkd.toml
+# Relative paths in trunkd.toml (spool, events, state/) land here.
+WorkingDirectory=%h/.local/state/trunkd
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

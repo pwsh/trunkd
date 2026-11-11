@@ -1,0 +1,13 @@
+# Workspace cargo settings.
+#
+# Nothing here is needed to build trunkd: no native library is linked at build
+# time (libhackrf and libSoapySDR are loaded at run time), so a stock rustup
+# toolchain and `cargo build --release` are enough on Linux and Windows.
+
+[alias]
+# `cargo t` is the test command the Cargo.toml profile comments and the test
+# docs refer to. It is plain `cargo test`: the speed comes from
+# [profile.test.package.*] in Cargo.toml, which optimizes the DSP crates so the
+# capture-replay tests run in a normal pass. Point TRUNKD_FIXTURES at a
+# directory of captures to run those (fixtures/README.md).
+t = "test"

@@ -1,0 +1,121 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/trunkd",
+    "crates/trunkd-call",
+    "crates/trunkd-core",
+    "crates/trunkd-mbe",
+    "crates/trunkd-p25",
+    "crates/trunkd-link",
+    "crates/trunkd-uplink",
+    "crates/trunkd-sdr",
+    "crates/trunkd-supervisor",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "GPL-3.0-or-later"
+authors = ["Eric Holzhueter"]
+description = "P25 Phase 1 trunked-radio recorder: SDR in, calls out to Keyup or any Rdio-Scanner-compatible server."
+repository = "https://github.com/pwsh/trunkd"
+homepage = "https://pwsh.github.io/radio-docs/"
+# Not published to crates.io: the workspace crates are built from this repo.
+publish = false
+
+# Shared dependency versions. Individual crates opt in via `workspace = true`.
+[workspace.dependencies]
+# Internal crates
+trunkd-core = { path = "crates/trunkd-core" }
+trunkd-mbe = { path = "crates/trunkd-mbe" }
+trunkd-p25 = { path = "crates/trunkd-p25" }
+trunkd-call = { path = "crates/trunkd-call" }
+trunkd-link = { path = "crates/trunkd-link" }
+trunkd-uplink = { path = "crates/trunkd-uplink" }
+trunkd-sdr = { path = "crates/trunkd-sdr" }
+trunkd-supervisor = { path = "crates/trunkd-supervisor" }
+
+# Shared third-party
+num-complex = "0.4"
+time = { version = "0.3", features = ["std", "macros", "formatting"] }
+thiserror = "2"
+crossbeam-channel = "0.5"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+
+# Recorder link: compact binary framing on UDP, authenticated with a truncated
+# HMAC-SHA256. Pure Rust, no TLS stack, no async runtime.
+postcard = { version = "1", features = ["use-std"] }
+hmac = "0.13"
+sha2 = "0.11"
+
+# SDR
+rtrb = "0.4"
+
+# Local control panel: a sync, dependency-light HTTP/1.1 server. No async
+# runtime, matching the supervisor's deliberately-plain-threads design.
+tiny_http = "0.12"
+
+# Config / CLI / logging (binary)
+figment = { version = "0.10", features = ["toml", "env"] }
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+toml = "1"
+# The panel's config writer edits the `[[device]]` and `[[site]]` tables in
+# place. `toml` alone can only re-serialize a whole document, which would throw
+# away every comment the operator wrote; `toml_edit` keeps the file byte-for-byte
+# outside the tables it touches. (toml 1.x no longer builds on it; the 0.22
+# still in the tree is figment's, through its own toml 0.8.)
+toml_edit = "0.25"
+quick-xml = { version = "0.42", features = ["serialize"] }
+# Event-log rotation compresses the previous day in place.
+flate2 = "1"
+
+# Runtime dlopen of native libraries: libhackrf (PortaPack reset) and
+# libSoapySDR (the whole `soapy` backend). No build-time native dependency.
+libloading = "0.9"
+# Real-time scheduling for the DSP thread (best effort)
+libc = "0.2"
+
+# Test-only
+rustfft = "6"
+
+# Line tables only: panics and backtraces keep file:line, debuggers lose
+# variable inspection. Full debuginfo was ~80 % of every test binary (the
+# `trunkd` unit-test binary: 229 MB, 188 MB of it DWARF) and most of a 12 GB
+# `target/debug`. `cargo t` inherits it.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+
+# `cargo t` optimizes the signal-processing crates, and every third-party
+# dependency, so the capture-replay tests (`trunkd-p25/tests/site_fixture.rs`,
+# `trunkd/tests/fixture_pipeline.rs`: 60 s of 20 Msps each) run in a normal
+# test pass instead of skipping — unoptimized they take many minutes. Debug
+# assertions and overflow checks stay on; only the optimizer changes. The
+# `trunkd` crate itself (the recorder's plumbing, most of the code) stays at
+# the dev level so its edit-test loop keeps building quickly.
+[profile.test.package."*"]
+opt-level = 3
+
+[profile.test.package.trunkd-core]
+opt-level = 3
+
+[profile.test.package.trunkd-sdr]
+opt-level = 3
+
+[profile.test.package.trunkd-p25]
+opt-level = 3
+
+[profile.test.package.trunkd-mbe]
+opt-level = 3
+
+[profile.test.package.trunkd-call]
+opt-level = 3

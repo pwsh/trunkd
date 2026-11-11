@@ -1,0 +1,498 @@
+# trunkd example configuration.
+#
+# Copy this file and adjust it: to /etc/trunkd/trunkd.toml for the system
+# service, ~/.config/trunkd/trunkd.toml for the user service (both in
+# scripts/systemd/), or config/trunkd.toml when running from a checkout. Then
+# `trunkd check --config <file>` validates it and lists the radios it can see.
+#
+# It describes a FICTIONAL system, "Example System" / site "Example County": one
+# HackRF One (in a PortaPack) at 20 Msps centred on 855.0 MHz, recording a P25
+# Phase 1 site and uploading every call to Keyup. None of the frequencies,
+# serials or addresses below belong to a real system; replace them with your
+# own. RadioReference lists a site's control channels (the frequencies marked
+# "c" on its page), and `trunkd import-sdrtrunk <playlist.xml>` prints a
+# [[site]] block from an sdrtrunk playlist. See docs/configuration.md.
+#
+# Relative paths (spool, events, state/) resolve against the working directory
+# trunkd is started in.
+#
+# Any value can be overridden by an environment variable, e.g.
+#   TRUNKD_SERVER__BIND=0.0.0.0:9000
+#   TRUNKD_UPLINK__API_KEY=secret
+
+[server]
+# The local control panel: a small embedded web page on the recorder box that
+# shows every tuner, site, counter and supervised unit, and can ask one tuner to
+# restart cleanly. Read-mostly on purpose — config editing stays in this file
+# (restart to apply) and in Keyup's desired-state. See docs/panel.md.
+#
+# Off by default: most recorders are headless boxes nobody logs into, and a
+# listening port nobody asked for is a liability rather than a feature.
+enabled = false
+# Where it listens. Loopback keeps it reachable only from the box itself (or an
+# SSH tunnel: ssh -L 8080:127.0.0.1:8080 recorder); set 0.0.0.0:8080 to put it
+# on the LAN, which you should only do together with `tokens` below.
+bind = "127.0.0.1:8080"
+# Bearer tokens accepted by the panel's /api/ routes. Non-empty: every API call
+# must send `Authorization: Bearer <token>`. Empty: reads are open and the
+# restart button works from loopback only.
+tokens = []
+# Live audio monitor: serve the voice this recorder is decoding, right now, at
+# /api/monitor/stream, with a player on the panel page. Off by default and a
+# separate decision from `enabled` above — it is a live tap on traffic, not a
+# status page.
+#
+# It is there to answer "is what this box decodes actually intelligible?", which
+# a finished call in Keyup answers an hour too late. Listening to recorded calls
+# stays in Keyup. Costs nothing while off (the fan-out is not even built), drops
+# frames rather than ever slowing call assembly, and allows four listeners at
+# once. Encrypted calls are silent: their voice is discarded before it is
+# vocoded, here as everywhere else.
+live_audio = false
+# How Keyup's status page should link to this panel ("Listen live"). Unset, the
+# recorder derives it from `bind` — and a 0.0.0.0 bind derives 127.0.0.1, so the
+# link works from this box's own browser and nowhere else. Set it when the panel
+# is bound to the LAN and should be reachable from Keyup.
+# public_url = "http://192.0.2.10:8080"
+# Console log level; RUST_LOG overrides. One of error|warn|info|debug|trace.
+log_level = "info"
+# Optional rolling-file log directory (console logging is always on).
+# log_dir = "logs"
+
+# --- Station self-description ----------------------------------------------
+
+# Who and where this recorder is. Every field is optional, operator-entered and
+# display-only: nothing here changes what trunkd records. It rides along on the
+# tuner-status POST so Keyup can show what each recorder is, and later pick the
+# best source among several instances hearing the same site — a judgement about
+# antennas, height and location as much as about live signal level. One-way:
+# Keyup displays it and can never override it.
+#
+# Text fields are capped at 256 characters (notes at 1024) when the config is
+# read. Latitude must be within -90..=90 and longitude within -180..=180; an
+# out-of-range coordinate is a startup error, never silently clamped.
+# [station]
+# name = "Example County — hilltop"
+# location = "Exampleville"
+# latitude = 40.0
+# longitude = -100.0
+# elevation_m = 750.0        # ground elevation; per-tuner mast height is below
+# contact = "N0CALL <ops@example.org>"
+# notes = "Deaf below 400 MHz until the second mast goes up."
+
+[uplink]
+# Keyup's Rdio-Scanner upload endpoint. The site-observations endpoint is
+# derived from it (/api/call-upload -> /api/recorder/observations).
+url = "http://keyup.example.org/api/call-upload"
+# The upload token Keyup minted for this recorder (`keyup token create
+# <name> --scopes upload`). Keep it out of version control; it can also come
+# from the environment as TRUNKD_UPLINK__API_KEY.
+api_key = ""
+
+# Labels every call is filed under. `system_label` is what Keyup keys its
+# talkgroup directory on, so it must match the imported playlist's system name.
+# Both fall back to the [[site]] labels when left empty.
+system_label = "Example System"
+site_label = "Example County"
+
+# MP3 is the default because it is the one format every downstream consumer
+# takes (Keyup, the Whisper appliance, Broadcastify Calls, OpenMHz) and 16 kbps
+# mono is sdrtrunk's own setting for 8 kHz IMBE voice. "wav" is available for
+# local archival.
+audio_format = "mp3"
+mp3_bitrate_kbps = 16
+
+# How often the site's observed channel plan is POSTed to Keyup. 0 disables it.
+observations_interval_s = 300
+
+# How long to wait, at start-up, for the one desired-state GET made *before* the
+# tuners are built. Seeding the first build with Keyup's stored config is what
+# keeps a tuner from restarting a second after its first lock (a recording gap
+# at every start) because some field Keyup manages differs from this file. A
+# Keyup that is down or slow costs at most this long and then the tuners start
+# from this file, exactly as they used to. 0 disables the prefetch.
+desired_prefetch_timeout_s = 3
+
+# Set false to assemble calls without delivering them (a decode-only dry run).
+enabled = true
+# The boot value of the upload *hold*: true spools every call and radio event
+# and skips the observations POST, without uploading any of it. The safe mode
+# for bring-up, and what a first smoke test should use.
+#
+# It is not an offline switch: the keyup control plane stays connected, so a
+# held recorder still registers and still reports status, and the hold can be
+# released from keyup's desired state or the local panel (POST /api/uplink)
+# without editing this file. Most recent writer wins. Use `enabled = false`
+# above for a recorder that must talk to nobody at all.
+spool_only = false
+
+# Whether this box may upload each finished call to Broadcastify Calls itself,
+# straight after the call ends, when keyup tells it to.
+#
+# A veto, not a trigger. Nothing happens until keyup pushes a
+# `recorder.broadcastify` block on the desired-state poll (endpoint, API key,
+# system id, talkgroup list, skew limit) — keyup's setting is the primary
+# switch and the credentials never live in this file. Set this to false on a
+# recorder that must not hold Broadcastify credentials at all, and every block
+# keyup sends it is refused. The outcome of each attempt (uploaded, duplicate,
+# failed, late, claim_denied, skipped) rides along on the call push to keyup and
+# is counted on the panel.
+direct_broadcastify = true
+
+# Offline spool: crash-safe, oldest-first eviction, drained on reconnect.
+spool_path = "spool"
+spool_cap_bytes = 1073741824 # 1 GiB
+# Free-space floor for the volume the spool lives on. The cap above bounds what
+# trunkd keeps; this bounds what the filesystem must keep free no matter who is
+# filling it — logs, a second recorder, an operator's copy. Whenever less than
+# this is available, the oldest spooled calls and radio-event batches are
+# evicted until it is, so the recorder never wedges on ENOSPC with calls it has
+# already decoded. 0 disables the floor.
+spool_min_free_bytes = 2147483648 # 2 GiB
+
+# --- SDR devices -----------------------------------------------------------
+
+# A HackRF One driven through the stock `hackrf_transfer` CLI. Needs nothing at
+# build time, only the tool on PATH at run time.
+[[device]]
+id = "hackrf0"
+backend = "hackrf"
+sample_rate = 20000000
+# The capture must cover every control candidate and every traffic channel the
+# site grants; startup fails if a control frequency falls outside it.
+center_frequency = 855000000
+# Seconds of samples the SDR ring holds before it must drop (default 1.0,
+# minimum 0.1). At 20 Msps this is ~160 MB. 0.2 s was measured to be too
+# shallow: a compiler running on the same box stalled the DSP thread for ~2 s
+# and cost 4.6 M samples. Raise it on a box that shares CPU with other work.
+ring_seconds = 1.0
+lna_db = 40 # 0..40 in 8 dB steps
+vga_db = 40 # 0..62 in 2 dB steps
+amp = true  # front-end +14 dB
+# Pin a specific board when several are attached (`hackrf_info` prints it).
+# serial = "0000000000000000deadbeef00000001"
+# PortaPack/Mayhem CDC console. When set, the board is switched out of the
+# PortaPack UI into HackRF mode before the tuner is opened.
+portapack_port = "/dev/ttyACM0"
+# Reset the board back into the PortaPack UI on exit. Off by default: an
+# unattended recorder that restarts wants HackRF mode to persist.
+restore_portapack_on_exit = false
+
+# Downlink ranges this tuner is responsible for, when its antenna/bandpass does
+# not cover the whole capture — labels (vhf, uhf, 700, 800, 900) or explicit
+# "lo-hi" Hz ranges, and they may be disjoint. Left out (the default) means the
+# whole usable capture. Each entry must resolve and overlap the capture or
+# startup fails. Bands gate traffic grants only: control acquisition is bounded
+# by the capture span, so a band list can never cost this tuner its control
+# channel. They do nothing on a `control` tuner (it publishes every grant) or on
+# a single-tuner site (nothing to partition against); they matter on a
+# multi-tuner site, where they are the partition the coordinator routes by.
+#
+# Keyup can override this list at run time through the desired-state endpoint —
+# the same labels, applied by restarting this one tuner, and echoed back on the
+# status POST as `bands`. An empty array pushed from Keyup clears the
+# restriction; the file is never written back. See docs/configuration.md.
+# bands = ["800", "851000000-856000000"]
+
+# What is bolted to this tuner. Free text, reported on the tuner-status POST
+# next to the measured `rssi_dbfs` and the gain settings above — which is the
+# only way to read a level that is ADC-referenced. Same 256/1024 character caps
+# as [station]. `receiver` defaults to the backend's own name ("HackRF One",
+# "Airspy", "SDRplay", "RTL-SDR", "IQ file") when left out.
+receiver = "HackRF One (PortaPack)"
+antenna = "800 MHz collinear @ 10 m"
+cable = "20 m low-loss coax"
+# The amplifier *chain* — distinct from `amp` above, which is the HackRF's own
+# +14 dB front-end amp.
+amplifier = "LNA + 800 MHz bandpass"
+height_m = 10.0
+notes = "Roof mount; the neighbouring building shades the west."
+
+# --- Other SDRs, through SoapySDR ------------------------------------------
+#
+# `backend = "soapy"` drives anything SoapySDR has a module for: Airspy,
+# SDRplay, RTL-SDR and the rest. The library is loaded at run time, so nothing
+# extra is needed to *build* trunkd; install the runtime and the driver module
+# for your radio (docs/sdr-hardware.md). `trunkd check` prints
+# which library it found and what it enumerated, and the info log line written
+# when a device opens lists every gain element with its range — that is where
+# the `[device.gains]` names below come from.
+#
+# THE SAMPLE-RATE RULE. The channelizer splits the capture into 12.5 kHz bins,
+# so `sample_rate / 12500` must be an even integer of at least 4, and the
+# hardware must support the rate *exactly*: many drivers silently coerce an
+# unsupported rate to a nearby one, which would move every recorded channel, so
+# trunkd reads the rate back and refuses to start if it changed. Known-good
+# picks: Airspy R2 10e6 or 2.5e6; Airspy Mini 6e6 or 3e6; SDRplay RSPdx 2e6-10e6
+# (8e6 with an 8 MHz bandwidth is the recommended wideband setting); RTL-SDR
+# 2.4e6 (3.2e6 drops samples on USB 2, and 2.56e6 is not divisible by 12500);
+# HackRF 20e6.
+
+# Airspy R2 (or Mini): 10 Msps, per-element LNA/MIX/VGA gains 0-15 (index, not
+# dB). Needs soapysdr-module-airspy.
+# [[device]]
+# id = "airspy0"
+# backend = "soapy"
+# driver = "airspy"
+# sample_rate = 10000000        # Mini: 6000000 or 3000000
+# center_frequency = 855000000
+# ppm = 0.0
+# Automatic frequency correction, on by default. The hunt measures each control
+# candidate's carrier offset and re-tunes the board until it is centred, which
+# is the difference between a board that locks and one that hunts forever with
+# a ~1 ppm TCXO. The applied total shows as `auto_ppm` on the panel; copy it
+# into `ppm` above if you would rather have it applied at open.
+#
+# You do not have to: whatever the loop measures is written down per board (by
+# serial) and dialled straight into the next open, so a restart resumes on the
+# known offset and locks immediately instead of hunting its way back to it. The
+# order is `ppm` -> remembered correction -> hunt refinement; see [recorder]
+# ppm_memory_path below and docs/sdr-hardware.md. With auto_ppm = false the
+# memory is reported and never applied — `ppm` is yours alone.
+# auto_ppm = true
+# auto_ppm_limit = 5.0          # ppm; a guard rail, not a tuning knob (max 50)
+# serial = "deadbeef00000002"   # only when several are attached
+# [device.gains]
+# LNA = 12
+# MIX = 10
+# VGA = 12
+# [device.settings]
+# biastee = "false"
+
+# SDRplay RSPdx: 8 Msps with a matching 8 MHz analog bandwidth, which the
+# driver otherwise leaves narrower than the capture. Needs the proprietary
+# sdrplay_api daemon plus SoapySDRPlay3.
+#
+# `IFGR` is IF *attenuation* in dB (20-59): LOWER means MORE gain. `RFGR` is the
+# LNA state index (0 = least attenuation), and its legal range depends on band.
+# Set `agc = true` instead to let the driver ride the IF gain itself.
+# [[device]]
+# id = "rspdx0"
+# backend = "soapy"
+# driver = "sdrplay"
+# sample_rate = 8000000
+# bandwidth_hz = 8000000
+# center_frequency = 855000000
+# rx_port = "Antenna B"         # the RSPdx port, not the `antenna` prose below
+# agc = false
+# [device.gains]
+# IFGR = 40
+# RFGR = 3
+# [device.settings]
+# rfnotch_ctrl = "false"        # the broadcast FM notch, off for 700/800 MHz
+
+# RTL-SDR (RTL2832U + R820T/R860): 2.4 Msps, a single `TUNER` element 0-49.6 dB.
+# Needs soapysdr-module-rtlsdr.
+#
+# `ppm` matters more here than on any other radio: these dongles run tens of ppm
+# off, and 50 ppm at 855 MHz is 43 kHz — more than three 12.5 kHz bins, which
+# means no control channel at all. Measure it once (rtl_test -p, or kalibrate)
+# and put it here.
+#
+# 2.4 MHz covers only a fraction of a 9 MHz P25 site, so a site normally needs
+# several dongles, each its own `[[device]]` with its own `center_frequency` and
+# a `bands` list partitioning the site between them.
+# [[device]]
+# id = "rtl0"
+# backend = "soapy"
+# driver = "rtlsdr"
+# sample_rate = 2400000
+# center_frequency = 851500000
+# gain = 40.0                   # or [device.gains] TUNER = 40.0
+# ppm = 2.5
+# serial = "00000001"
+# bands = ["851000000-853000000"]
+# [device.settings]
+# biastee = "false"
+
+# An IQ-file source stands in for hardware in tests and offline replay:
+# [[device]]
+# id = "replay0"
+# backend = "iqfile"
+# path = "fixtures/example_20M_int8.iq"   # capturing one: fixtures/README.md
+# sample_rate = 20000000
+# center_frequency = 855000000
+# pacing = "unthrottled"   # or "realtime" to imitate hardware timing
+
+# --- P25 trunked sites -----------------------------------------------------
+
+[[site]]
+system = "Example System"
+site = "Example County"
+device = "hackrf0"
+# Disabled sites stay in the config (toggled via the control API) but are not
+# decoded. The sdrtrunk importer preserves this rather than dropping entries.
+enabled = true
+# Every candidate is decoded *at once*; the first to yield five valid TSBKs
+# under a consistent NAC wins and the rest are dropped. Order is preference
+# only, and a candidate carrying a voice call can never win the hunt.
+control_frequencies = [
+    851250000,
+    852500000,
+    853750000,
+    857000000,
+]
+# Bounded traffic-channel recorder pool. Exhaustion is counted and warned.
+traffic_pool_size = 20
+# How long a traffic subscription is held after a call ends, so a follow-on
+# transmission on the same frequency is caught in full. Default 2000.
+# hang_ms = 2000
+# A call with no voice or signaling for this long is closed. Default 3000.
+# call_inactivity_ms = 3000
+# Phase 2 (TDMA) support wires up in build stage A6.
+phase2 = false
+
+# --- Conventional analog channels (not implemented yet) --------------------
+
+# Accepted and validated, but logged as "not implemented yet" and skipped.
+# [[channel]]
+# name = "Fire Dispatch"
+# device = "hackrf0"
+# frequency = 154250000
+# mode = "nbfm"            # or "am"
+# enabled = true
+# bandwidth_hz = 12500     # 12500 narrowband, 25000 wideband
+# talkgroup = 14           # synthetic talkgroup id reported on calls
+#
+# Squelch must come last: TOML sub-tables follow the scalar fields.
+# [channel.squelch]
+# noise_open = 0.1
+# noise_close = 0.19
+# hysteresis_open = 4
+# hysteresis_close = 6
+
+# --- Health thresholds -----------------------------------------------------
+
+[health]
+# Overflow samples/sec at or above which the DSP thread warns it is behind.
+overflow_warn_per_sec = 10000
+# Seconds without control-channel sync before hunting alternate frequencies.
+control_sync_timeout_secs = 30
+
+# --- Local, non-uplink recorder state --------------------------------------
+# Nothing here is ever sent anywhere; what it costs is disk.
+
+[recorder]
+# The raw non-voice event log: one JSON object per line, one file per UTC day,
+# gzipped when the day rolls over. A busy county site writes a couple of
+# million lines (~300 MB) a day. Voice is never written to it. See
+# docs/operations.md.
+event_log = true
+event_log_dir = "events"
+# Days kept; older files are deleted at rotation. 0 keeps them forever.
+event_log_keep_days = 14
+# Log traffic-channel signaling (link control, HDU, PDU, LSD) as well as the
+# control channel. Turn off to log the control channel alone.
+event_log_traffic = true
+# Upload each finished day's .jsonl.gz to <uplink.url>/api/recorder/event-log
+# once the rotation has completed it. Off by default: the event log is
+# deliberately the one thing that stays on the box, and shipping a few hundred
+# megabytes a day is a decision rather than an inheritance. When on, a
+# <file>.archived marker beside each day records keyup's reply, days finished
+# while the recorder was off are caught by the startup scan, and the uplink
+# hold suppresses uploads like any other. See docs/keyup.md.
+event_log_archive = false
+# Batch per-radio events (registrations, affiliations, data grants) and POST
+# them to <uplink.url>/api/recorder/events.
+radio_events = true
+# Cap on the undelivered radio-event spool (spool/events/). The same
+# [uplink] spool_min_free_bytes floor applies to it — it shares the volume.
+event_spool_cap_bytes = 67108864
+# Depth of the DSP -> observations/event-log queue, in events. The queue is
+# drop-oldest: when it fills, the oldest event is evicted and counted, which the
+# status line reports as event_log_dropped. A data session (PDU HEADER/PDU at a
+# few hundred a minute) is what fills it; raise this if that counter climbs.
+# Range 256..=1048576; ~112 bytes an event, so the default is under 2 MiB.
+event_queue_depth = 16384
+# Fewest voice frames a finished call must carry to be encoded and uploaded.
+# A grant whose traffic channel never delivered anything ends as a properly
+# identified call with no voice on it; encoding one produces a 288-byte MP3
+# that is a LAME header and no audio, which Keyup's decoder rejects. Those are
+# counted (calls.discarded_empty) and not sent. Only the AUDIO is dropped: the
+# call's observation and radio events go out as always. 0 uploads everything.
+min_voice_frames = 1
+# Follow unit-to-unit (private) voice grants. Many sites carry private-call
+# setup as multi-block AMBT messages (opcodes 0:4 and 0:6); on the site this
+# was built against, ignoring them meant dozens of clear conversations a day
+# the recorder decoded, logged and refused to record. On, such a
+# grant competes for a traffic channel like an unpatched group call, and the
+# call goes up with call_kind=unit + target_radio_id instead of a talkgroup.
+# Off leaves the grants decoded, counted and logged but unfollowed.
+follow_unit_calls = true
+# Talkgroups this recorder never records. A grant for one of them claims no
+# tuner, opens no call and uploads nothing, and is not published to a sibling
+# tuner or a link peer either - the traffic channel stays free for a talkgroup
+# somebody wants. The grant is still decoded, logged and counted, and the radio
+# events around it are archived as always: only the recording does not happen.
+# This is your half of the list. Keyup pushes the talkgroups whose Record,
+# Transcribe and export switches an operator turned off, and the two are UNIONED
+# - Keyup can add to this list at runtime but never take an entry of it away.
+# Counted as calls.skipped_by_policy. A call already on the air when its
+# talkgroup joins the list finishes; a patched call is skipped only when every
+# member talkgroup is skipped too.
+skip_talkgroups = []
+# Sanity box a decoded LRRP location must land in: [lat_min, lon_min, lat_max,
+# lon_max]. An empty list ([]) means no box. The default is a generous CONUS
+# rectangle; set your own if you are outside it. It is the last of several
+# plausibility rules the location gate applies - a four-day event log once held
+# seven "locations", all of them the same South Atlantic coordinate read out of
+# the padding behind an ordinary outbound poll. A refused fix is logged at DEBUG
+# and counted in lrrp.rejected.<reason>.
+location_bounds = [24.0, -125.0, 50.0, -66.0]
+# Where each board's measured frequency correction is remembered, so a tuner
+# that has already been measured re-opens on its known offset. Keyed by board
+# (backend + serial), not by device id, so it follows the hardware across a
+# rename or a different USB port. Default: <uplink.spool_path>/../state/
+# ppm-memory.json — i.e. state/ppm-memory.json beside the default spool/.
+# `trunkd check` prints the table. Delete the file to make every board
+# re-measure from its configured ppm.
+# ppm_memory_path = "state/ppm-memory.json"
+
+# --- Recorder link ---------------------------------------------------------
+# Off by default. Turned on, this recorder swaps grants with its peers over
+# UDP: a recorder following a control channel offers every grant it cannot
+# record itself, and any peer with a free tuner covering the frequency takes
+# it. Peers also say what they are recording, so a fleet can be seen from any
+# one of its members. See docs/recorder-link.md.
+#
+# It is the same mechanism as the in-process coordinator that hands grants
+# between two tuners of one recorder, so "a control tuner and a voice tuner in
+# one process" and "two recorders on two boxes" are configured the same way.
+
+# [link]
+# enabled = false
+# Local UDP bind. 0.0.0.0 to hear peers on any interface.
+# bind = "0.0.0.0:47123"
+# Every peer gets every message; put each recorder's address in the others'
+# lists. A recorder with no peers only listens.
+# peers = ["192.0.2.11:47123", "192.0.2.12:47123"]
+# Shared secret, at least 16 characters, identical on every peer. Required
+# when enabled: without it, anyone who can reach the port can make this
+# recorder tune away.
+# key = "change-me-to-something-long-and-random"
+# Seconds between advertisements. A peer counts as alive for three of these
+# after its last message.
+# hello_interval_s = 5
+# Whether a peer's grants are routed to this recorder's tuners.
+# accept_remote_grants = true
+# Whether grants heard here are offered to peers.
+# publish_grants = true
+# Whether a peer saying "I have this call" stops this recorder recording it
+# too. Off by default: keyup picks a best source among copies, so a second
+# recording costs a little disk and may be the better one, while a call
+# suppressed here and then lost there is gone. Turn it on when tuners, rather
+# than disk, are what you are short of.
+# defer_to_claims = false
+# A grant is the one message that is retried: the peer acknowledges each one,
+# and an unacknowledged grant is resent this many times, this far apart, before
+# the sender stops waiting. The default spends 24 ms of the 100-300 ms a P25
+# grant has before its voice starts. 0 retries turns it off; the acknowledgement
+# is still counted, and a peer that never sends one is written off after three
+# grants and then only sent them once.
+# grant_retries = 3
+# grant_retry_ms = 8
+#
+# Per tuner, [[device]] remote_grants decides whether a peer can hand it work.
+# The default follows the role: voice and data tuners exist to be handed
+# traffic and take them; auto and control tuners are busy with their own
+# control channel and do not.

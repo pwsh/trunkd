@@ -1,0 +1,25 @@
+[package]
+name = "trunkd-p25"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "P25 Phase 1 (C4FM / LSM) receive-side decoder engine: IQ in, trunking events and raw IMBE frames out."
+
+[dependencies]
+trunkd-core.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+rustfft.workspace = true
+thiserror.workspace = true
+# Debug lines only: the inventory says which CRC-passing block it rejected as
+# implausible. The facade costs nothing when no subscriber is installed.
+tracing.workspace = true
+
+[dev-dependencies]
+# Examples and the inventory round-trip test render `InventorySnapshot` as JSON.
+serde_json = "1"

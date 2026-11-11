@@ -1,0 +1,33 @@
+# cargo-about configuration. Generates THIRD-PARTY.md, the license texts of
+# every crate the trunkd binary links:
+#
+#     cargo about generate about.hbs > THIRD-PARTY.md
+#
+# The release gate regenerates it and fails if it differs from the committed
+# copy. Code ported into trunkd itself (JMBE, JTransforms, sdrtrunk) and LAME's
+# own notice are in NOTICE.md, not here. Keep `accepted` in step with the
+# `[licenses] allow` list in deny.toml.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "LGPL-3.0",
+    "GPL-3.0-or-later",
+]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+# trunkd's own crates are covered by LICENSE and NOTICE.md.
+private = { ignore = true }
+# ring and rustls ship license files cargo-about cannot classify unaided.
+workarounds = ["ring", "rustls"]

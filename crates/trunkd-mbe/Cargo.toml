@@ -1,0 +1,15 @@
+[package]
+name = "trunkd-mbe"
+description = "IMBE (P25 Phase 1) voice decoder — a Rust port of JMBE"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-3.0-or-later"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]

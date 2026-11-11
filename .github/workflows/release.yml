@@ -1,0 +1,164 @@
+# Release binaries for a version tag.
+#
+# Pushing a tag vX.Y.Z builds Linux x86-64 and Windows x64 binaries and
+# attaches them to a DRAFT GitHub release for that tag. Nothing is published:
+# the maintainer reviews the draft and publishes it by hand. This workflow
+# never pushes, never creates or moves tags, and refuses to touch a release
+# for the tag that has already been published.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check-version:
+    name: Tag matches the workspace version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - id: version
+        name: Compare the tag with Cargo.toml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\([^"]*\)".*/\1/p}' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::no version in [workspace.package] of Cargo.toml"
+            exit 1
+          fi
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match the workspace version $version (expected v$version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check-version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # The oldest supported Ubuntu runner, so the binary's glibc floor is
+          # as low as GitHub allows.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: trunkd
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: trunkd.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+
+      - name: Test
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cargo test --workspace --lib --locked
+          else
+            cargo test --workspace --locked
+          fi
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="trunkd-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "dist/$name/"
+          cp LICENSE NOTICE.md README.md CHANGELOG.md trunkd.example.toml "dist/$name/"
+          # Generated at release time (cargo about); ship it when the tree has it.
+          if [ -f THIRD-PARTY.md ]; then cp THIRD-PARTY.md "dist/$name/"; fi
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            echo "file=dist/$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            echo "file=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ steps.package.outputs.file }}
+          if-no-files-found: error
+          retention-days: 7
+
+  draft-release:
+    name: Attach to a draft release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum trunkd-v*.tar.gz trunkd-v*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::release $TAG is already published; not modifying it"
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --draft \
+              --verify-tag \
+              --title "trunkd $TAG" \
+              --notes "Draft for $TAG, built by the Release workflow from $GITHUB_SHA. Add the CHANGELOG entry and publish by hand. The Windows build needs the SoapySDR runtime beside trunkd.exe for Airspy, SDRplay and RTL-SDR radios; see docs/install-windows.md."
+          fi
+          echo "Draft release $TAG is ready for review. It has not been published."

@@ -1,0 +1,98 @@
+[package]
+name = "trunkd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "P25 trunked-radio recorder: SDR in, calls uploaded to Keyup."
+default-run = "trunkd"
+# Provenance for the About page: the git sha, build time, toolchain and the
+# resolved dependency table, none of which a binary can work out for itself.
+build = "build.rs"
+
+[lib]
+name = "trunkd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trunkd"
+path = "src/main.rs"
+
+[features]
+default = ["soapy", "hackrf"]
+# The SoapySDR backend (Airspy, SDRplay, RTL-SDR, ...). Costs nothing at build
+# time: the library is dlopen'd at run time, and only when a Soapy `[[device]]`
+# is configured. `trunkd-sdr` also has it on by default, so this forwarding is
+# belt and braces for a build that pins trunkd-sdr's features explicitly.
+soapy = ["trunkd-sdr/soapy"]
+# The HackRF backend, forwarded for the same reason. Also what the About page
+# tests to decide whether asking libhackrf its version means anything.
+hackrf = ["trunkd-sdr/hackrf"]
+
+[dependencies]
+trunkd-core.workspace = true
+trunkd-sdr.workspace = true
+trunkd-supervisor.workspace = true
+trunkd-p25.workspace = true
+trunkd-mbe.workspace = true
+trunkd-call.workspace = true
+trunkd-link.workspace = true
+trunkd-uplink.workspace = true
+
+figment.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+quick-xml.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json = "1"
+num-complex.workspace = true
+rustfft.workspace = true
+time.workspace = true
+ureq = "3"
+tiny_http.workspace = true
+crossbeam-channel.workspace = true
+ctrlc = "3"
+# Keyup push channel (W6): a blocking, sync WebSocket client. No async runtime,
+# matching the rest of the process. `rustls-tls-webpki-roots` bundles the trust
+# anchors so `wss://` works off-LAN on every target without depending on a
+# platform certificate store (which is what makes the Windows build identical
+# to the Linux one — there is no platform-specific code here).
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+
+# Real-time scheduling for the DSP thread; best effort, never required.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Native service integration (`trunkd service ...`): Windows has no systemd, so
+# an unattended recorder has to be registered with the service control manager.
+# A thin, well-scoped wrapper over the winsvc API — nothing here is pulled in on
+# Linux, where a systemd unit is the supported path.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+# The About page's two Windows-only facts: the real OS version (`RtlGetVersion`
+# — `GetVersionEx` reports 6.2 to any binary without a compatibility manifest)
+# and free space on the volume holding the spool.
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+] }
+
+[build-dependencies]
+# The About page's build stamp: the lockfile is TOML and the timestamp needs
+# formatting. Both crates are already in the tree, so neither adds a fetch.
+toml.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# The fixture test parses the mock Keyup's observation bodies.
+serde_json = "1"

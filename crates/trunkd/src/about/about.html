@@ -1,0 +1,418 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The About / diagnostics page, served whole from GET /about. Inline CSS and
+     JS only, for the same reason the panel has none: a recorder may be on a
+     box with no route out, and the page you need when things are wrong is the
+     one that must never depend on anything being right. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trunkd — about</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262d38; --ink: #d7dde5;
+    --dim: #8b95a3; --accent: #4fb8ff; --ok: #46d17a; --warn: #e8b93b;
+    --bad: #ef6b6b; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 var(--mono);
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 2;
+  }
+  header h1 { font-size: 14px; margin: 0; color: var(--accent); font-weight: 600; }
+  header .sp { flex: 1 1 auto; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .dim { color: var(--dim); }
+  main { padding: 12px 14px 40px; display: grid; gap: 14px; }
+  details {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+  }
+  summary {
+    cursor: pointer; padding: 8px 12px; list-style: none;
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600; display: flex; gap: 10px; align-items: baseline;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸"; color: var(--accent); font-size: 10px; }
+  details[open] > summary::before { content: "▾"; }
+  summary .count { margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .body { padding: 0 12px 12px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 1px 14px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  .scroll { overflow-x: auto; }
+  .pill { border-radius: 9px; padding: 0 7px; font-size: 11px; border: 1px solid var(--line); }
+  .ok { color: var(--ok); border-color: #24502f; }
+  .warn { color: var(--warn); border-color: #4d4020; }
+  .bad { color: var(--bad); border-color: #562727; }
+  button {
+    font: inherit; color: var(--ink); background: #1f2732; border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 9px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  input {
+    font: inherit; color: var(--ink); background: #0b0e13; border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 6px; width: 18em;
+  }
+  pre {
+    margin: 0; white-space: pre; overflow-x: auto; background: #0b0e13;
+    border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px;
+  }
+  .msg { min-height: 1.4em; font-size: 12px; }
+  #banner { display: none; padding: 6px 14px; background: #3a1d1d; color: #ffc9c9; border-bottom: 1px solid #562727; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 8px; }
+  ul.plain { margin: 0; padding-left: 1.2em; }
+</style>
+
+<header>
+  <h1>trunkd</h1>
+  <span class="dim">about</span>
+  <span id="ident" class="dim">…</span>
+  <span class="sp"></span>
+  <label class="dim">token <input id="token" type="password" placeholder="none set" autocomplete="off"></label>
+  <button id="copy" type="button">copy as JSON</button>
+  <a href="/">← panel</a>
+</header>
+<div id="banner"></div>
+
+<main>
+  <details open>
+    <summary>Build <span class="count" id="buildsum"></span></summary>
+    <div class="body"><dl class="kv" id="build"></dl></div>
+  </details>
+
+  <details>
+    <summary>Runtime libraries <span class="count" id="libsum"></span></summary>
+    <div class="body" id="libraries"></div>
+  </details>
+
+  <details>
+    <summary>Process &amp; host <span class="count" id="procsum"></span></summary>
+    <div class="body">
+      <dl class="kv" id="process"></dl>
+      <h3 class="dim" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;">Directories</h3>
+      <div class="scroll"><table id="dirs"></table></div>
+    </div>
+  </details>
+
+  <details>
+    <summary>Dependencies <span class="count" id="depsum"></span></summary>
+    <div class="body">
+      <div class="row">
+        <label class="dim">filter <input id="depfilter" type="search" placeholder="name, version or source" autocomplete="off"></label>
+        <span class="dim" id="depshown"></span>
+      </div>
+      <div class="scroll"><table id="deps"></table></div>
+    </div>
+  </details>
+
+  <details>
+    <summary>Effective configuration <span class="count" id="cfgsum"></span></summary>
+    <div class="body">
+      <div class="row">
+        <span class="pill ok">secrets redacted by field name</span>
+        <span class="dim" id="cfgpath"></span>
+      </div>
+      <pre id="cfgtoml">…</pre>
+      <div class="row" style="margin-top:10px">
+        <span class="dim">Set in the config file:</span>
+        <span id="cfgkeys" class="dim"></span>
+      </div>
+      <div class="row">
+        <span class="dim">Environment overrides:</span>
+        <span id="cfgenv" class="dim"></span>
+      </div>
+    </div>
+  </details>
+</main>
+
+<script>
+"use strict";
+
+// The panel keeps the operator's bearer token in localStorage under this key;
+// sharing it means a token typed on one page works on the other.
+const TOKEN_KEY = "trunkd.panel.token";
+const tokenInput = document.getElementById("token");
+// A private-mode browser throws on both of these; the page still works, it
+// just does not remember the token between loads.
+try { tokenInput.value = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { /* private mode */ }
+tokenInput.addEventListener("change", () => {
+  try { localStorage.setItem(TOKEN_KEY, tokenInput.value); } catch (e) { /* ignore */ }
+  load();
+});
+
+let ABOUT = null;
+
+function banner(text) {
+  const el = document.getElementById("banner");
+  el.textContent = text || "";
+  el.style.display = text ? "block" : "none";
+}
+
+function text(el, value) { el.textContent = value; }
+
+/** A value rendered for a definition list: null becomes an explicit dash. */
+function show(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  return String(v);
+}
+
+function bytes(n) {
+  if (n === null || n === undefined) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0, v = Number(n);
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(1)) + " " + units[i];
+}
+
+function kv(el, pairs) {
+  el.replaceChildren();
+  for (const [k, v] of pairs) {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = show(v);
+    el.append(dt, dd);
+  }
+}
+
+function table(el, headers, rows) {
+  el.replaceChildren();
+  const thead = el.createTHead().insertRow();
+  for (const h of headers) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    thead.append(th);
+  }
+  const body = el.createTBody();
+  for (const row of rows) {
+    const tr = body.insertRow();
+    for (const cell of row) {
+      tr.insertCell().textContent = show(cell);
+    }
+  }
+}
+
+function renderBuild(b) {
+  const dirty = b.git_dirty === true ? " (dirty)" : b.git_dirty === false ? "" : " (dirty: unknown)";
+  document.getElementById("buildsum").textContent = b.version + " · " + b.git_sha + dirty;
+  document.getElementById("ident").textContent = "v" + b.version + " " + b.git_sha;
+  kv(document.getElementById("build"), [
+    ["version", b.version],
+    ["git commit", b.git_sha + dirty],
+    ["git describe", b.git_describe],
+    ["built at", b.built_at],
+    ["built on", b.built_on],
+    ["rustc", b.rustc],
+    ["target", b.target],
+    ["build host triple", b.host_triple],
+    ["profile", b.profile + " (opt-level " + b.opt_level + ")"],
+    ["features", (b.features || []).join(", ")],
+    ["debug assertions", b.debug_assertions],
+  ]);
+}
+
+function renderLibraries(libs) {
+  const host = document.getElementById("libraries");
+  host.replaceChildren();
+  let up = 0, total = 0;
+
+  const section = (title, node) => {
+    const h = document.createElement("div");
+    h.className = "row";
+    const name = document.createElement("strong");
+    name.textContent = title;
+    h.append(name);
+    host.append(h, node);
+  };
+
+  const soapy = libs.soapysdr || {};
+  total++;
+  if (soapy.available) {
+    up++;
+    const dl = document.createElement("dl");
+    dl.className = "kv";
+    kv(dl, [
+      ["library", soapy.library],
+      ["resolved path", soapy.resolved_path],
+      ["API version", soapy.api_version],
+      ["lib version", soapy.lib_version],
+      ["ABI version", soapy.abi_version],
+      ["root path", soapy.root_path],
+      ["modules", soapy.module_count],
+    ]);
+    section("SoapySDR", dl);
+    if ((soapy.modules || []).length) {
+      const t = document.createElement("table");
+      table(t, ["module", "version"], soapy.modules.map(m => [m.path, m.version || "not loaded"]));
+      const wrap = document.createElement("div");
+      wrap.className = "scroll";
+      wrap.append(t);
+      host.append(wrap);
+    }
+  } else {
+    section("SoapySDR", unavailable(soapy.reason));
+  }
+
+  for (const [key, title] of [["libhackrf", "libhackrf"], ["mp3_encoder", "MP3 encoder"]]) {
+    const lib = libs[key] || {};
+    total++;
+    if (!lib.available) { section(title, unavailable(lib.reason)); continue; }
+    up++;
+    const dl = document.createElement("dl");
+    dl.className = "kv";
+    kv(dl, key === "libhackrf"
+      ? [["version", lib.version], ["release", lib.release]]
+      : [["name", lib.name], ["version", lib.version], ["linkage", lib.linkage]]);
+    section(title, dl);
+  }
+
+  const std = libs.rust_std || {};
+  const dl = document.createElement("dl");
+  dl.className = "kv";
+  kv(dl, [
+    ["target", std.target],
+    ["os / arch", std.os + " / " + std.arch],
+    ["family", std.family],
+    ["pointer width", std.pointer_width],
+  ]);
+  section("Rust std", dl);
+
+  document.getElementById("libsum").textContent = up + " of " + total + " available";
+}
+
+function unavailable(reason) {
+  const p = document.createElement("div");
+  const pill = document.createElement("span");
+  pill.className = "pill warn";
+  pill.textContent = "not available";
+  const why = document.createElement("div");
+  why.className = "dim";
+  why.style.marginTop = "3px";
+  why.textContent = reason || "";
+  p.append(pill, why);
+  return p;
+}
+
+function renderProcess(p) {
+  document.getElementById("procsum").textContent =
+    (p.hostname || "?") + " · up " + duration(p.uptime_s) + " · " + p.launched_by;
+  kv(document.getElementById("process"), [
+    ["hostname", p.hostname],
+    ["os", p.os],
+    ["os version", p.os_version],
+    ["kernel / build", p.kernel],
+    ["arch", p.arch],
+    ["cpus", p.cpus],
+    ["pid", p.pid],
+    ["started at", p.started_at],
+    ["uptime", duration(p.uptime_s)],
+    ["launched by", p.launched_by],
+    ["executable", p.executable],
+    ["working dir", p.working_dir],
+  ]);
+  table(
+    document.getElementById("dirs"),
+    ["role", "path", "exists", "free", "total"],
+    (p.directories || []).map(d => [
+      d.label, d.path, d.exists ? "yes" : "no", bytes(d.free_bytes), bytes(d.total_bytes),
+    ])
+  );
+}
+
+function duration(s) {
+  if (s === null || s === undefined) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  if (m) return m + "m " + sec + "s";
+  return sec + "s";
+}
+
+function renderDeps(deps) {
+  document.getElementById("depsum").textContent =
+    deps.count + " packages (" + deps.workspace_count + " ours)";
+  filterDeps();
+}
+
+function filterDeps() {
+  if (!ABOUT) return;
+  const deps = ABOUT.dependencies;
+  const q = document.getElementById("depfilter").value.trim().toLowerCase();
+  const rows = (deps.packages || []).filter(p =>
+    !q || (p.name + " " + p.version + " " + p.source).toLowerCase().includes(q)
+  );
+  table(
+    document.getElementById("deps"),
+    ["package", "version", "source", "ours"],
+    rows.map(p => [p.name, p.version, p.source, p.workspace ? "yes" : ""])
+  );
+  document.getElementById("depshown").textContent =
+    rows.length === deps.count ? "" : rows.length + " of " + deps.count + " shown";
+}
+document.getElementById("depfilter").addEventListener("input", filterDeps);
+
+function renderConfig(c) {
+  document.getElementById("cfgsum").textContent = c.path || "no config file (environment only)";
+  document.getElementById("cfgpath").textContent = c.path ? "loaded from " + c.path : "loaded from the environment";
+  document.getElementById("cfgtoml").textContent = c.toml || "";
+  const keys = c.keys_from_file || [];
+  document.getElementById("cfgkeys").textContent =
+    keys.length ? keys.join("  ") : "nothing — every value is a default";
+  const env = c.env_overrides || [];
+  document.getElementById("cfgenv").textContent =
+    env.length ? env.join("  ") : "none";
+}
+
+document.getElementById("copy").addEventListener("click", async () => {
+  if (!ABOUT) return;
+  const text = JSON.stringify(ABOUT, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    banner("");
+  } catch (e) {
+    // Clipboard access needs a secure context, which plain http on a LAN is
+    // not; fall back to selecting it so a manual copy still works.
+    const pre = document.getElementById("cfgtoml");
+    pre.textContent = text;
+    banner("clipboard unavailable (" + e + "); the JSON is shown in the config box for manual copying");
+  }
+});
+
+async function load() {
+  const headers = {};
+  const token = tokenInput.value.trim();
+  if (token) headers["Authorization"] = "Bearer " + token;
+  try {
+    const resp = await fetch("/api/about", { headers });
+    if (resp.status === 401) {
+      banner("this panel needs a bearer token: enter it above");
+      return;
+    }
+    if (!resp.ok) {
+      banner("GET /api/about failed with " + resp.status);
+      return;
+    }
+    ABOUT = await resp.json();
+    banner("");
+    renderBuild(ABOUT.build);
+    renderLibraries(ABOUT.libraries);
+    renderProcess(ABOUT.process);
+    renderDeps(ABOUT.dependencies);
+    renderConfig(ABOUT.config);
+  } catch (e) {
+    banner("could not reach the recorder: " + e);
+  }
+}
+
+load();
+</script>

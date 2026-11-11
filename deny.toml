@@ -1,0 +1,73 @@
+# cargo-deny configuration: `cargo deny check licenses advisories bans sources`.
+# CI runs it on every push, and the release gate (`release/verify.sh`) runs it
+# on the staging tree. Format: cargo-deny 0.18+ (config version 2).
+
+[graph]
+# Check the platforms trunkd ships for, not every target a dependency names.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+version = 2
+# Unmaintained crates are reported for direct dependencies only; transitive
+# ones are the upstream crate's call.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+# Every license here is compatible with distributing trunkd as a whole under
+# GPL-3.0-or-later. To add one, check it is GPL-3.0 compatible
+# (https://www.gnu.org/licenses/license-list.html) and say why in the commit.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0",
+    # webpki-roots / root certificate data.
+    "CDLA-Permissive-2.0",
+    # trunkd's own crates.
+    "GPL-3.0-or-later",
+]
+confidence-threshold = 0.9
+
+# LAME (MP3 encoding) is the only copyleft dependency. It is LGPL and is
+# allowed for these two crates only; NOTICE.md explains how it is used. The
+# crates declare the deprecated SPDX id `LGPL-3.0` (= LGPL-3.0-only); cargo-deny
+# warns about the deprecated id and the exception below accepts it.
+[[licenses.exceptions]]
+crate = "mp3lame-sys"
+allow = ["LGPL-3.0"]
+
+[[licenses.exceptions]]
+crate = "mp3lame-encoder"
+allow = ["LGPL-3.0"]
+
+[licenses.private]
+# The workspace crates are `publish = false`; their GPL-3.0-or-later is still
+# checked against the allow list above rather than skipped.
+ignore = false
+
+[bans]
+# Duplicate versions are reported but do not fail the check: several come in
+# through figment's older toml and are not ours to fix.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between the workspace crates have no version requirement;
+# that is allowed because no crate is published (`publish = false`).
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

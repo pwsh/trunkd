@@ -1,0 +1,34 @@
+# Rust build artifacts
+/target/
+# Release packaging output (.github/workflows/release.yml stages archives here).
+/dist/
+**/*.rs.bk
+Cargo.lock.orig
+
+# trunkd runtime state
+/spool/
+spool/
+/logs/
+# The raw non-voice event log ([recorder] event_log_dir): ~300 MB/day.
+/events/
+events/
+# Local configuration (a recorder config carries the Keyup upload token) and
+# local-only material kept beside the checkout.
+/config/
+
+# Per-file event-log scan caches written by harness scripts.
+harness/.*-cache/
+__pycache__/
+
+# Local tooling / oracle scratch (JDK, sdrtrunk build, harness, converted WAVs)
+/scratch/
+
+# IQ scratch recordings (test fixtures live elsewhere)
+*.iq
+*.c8
+*.cs16
+*.cf32
+
+# Editor / OS
+.DS_Store
+*.swp

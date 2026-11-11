@@ -1,0 +1,42 @@
+[package]
+name = "trunkd-sdr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "SDR source layer for trunkd: TunerDevice trait, IQ-file, HackRF and SoapySDR backends."
+
+[features]
+default = ["iqfile", "hackrf", "soapy"]
+# Play back interleaved IQ files as a virtual tuner (the test source).
+iqfile = ["dep:hound"]
+# Drive a HackRF One through the stock `hackrf_transfer` CLI. Default: it
+# needs no native library at build time, only the tool at run time. `libloading`
+# is used to dlopen libhackrf for the PortaPack reset path (see `portapack`).
+hackrf = ["dep:libloading"]
+# Every SDR SoapySDR has a module for (Airspy, SDRplay, RTL-SDR, ...), driven
+# through the SoapySDR C ABI `dlopen`ed at run time. Default: like `hackrf` it
+# needs nothing at build time, only the shared library when a Soapy `[[device]]`
+# is actually configured. See the `soapy` module docs.
+soapy = ["dep:libloading"]
+
+[dependencies]
+trunkd-core.workspace = true
+num-complex.workspace = true
+rtrb.workspace = true
+tracing.workspace = true
+
+hound = { version = "3", optional = true }
+libloading = { workspace = true, optional = true }
+
+[dev-dependencies]
+rustfft.workspace = true
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "hackrf_probe"
+required-features = ["hackrf"]

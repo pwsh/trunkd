@@ -1,0 +1,17 @@
+# Allow re-granting CAP_SYS_NICE to a rebuilt trunkd binary without a password,
+# so a build-and-restart script can reapply it (file capabilities are lost every
+# time the binary is rewritten). Only needed when you run trunkd straight out of
+# a source checkout; the systemd units in scripts/systemd/ grant the capability
+# themselves (AmbientCapabilities=CAP_SYS_NICE) and need none of this.
+#
+# Replace YOURUSER with the account that builds trunkd and BINARY with the
+# absolute path of the built binary (no wildcards: sudoers matches it literally),
+# then check and install it:
+#
+#   sed -e "s|YOURUSER|$USER|" -e "s|BINARY|$PWD/target/release/trunkd|" \
+#       scripts/trunkd-setcap.sudoers.template > /tmp/trunkd-setcap
+#   sudo visudo -cf /tmp/trunkd-setcap
+#   sudo install -m 0440 /tmp/trunkd-setcap /etc/sudoers.d/trunkd-setcap
+#
+# scripts/grant-rt.sh then runs `sudo -n setcap` against that same path.
+YOURUSER ALL=(root) NOPASSWD: /usr/sbin/setcap cap_sys_nice+ep BINARY

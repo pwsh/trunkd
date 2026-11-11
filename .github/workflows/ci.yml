@@ -1,0 +1,101 @@
+# CI for pull requests and main. Read-only: it builds, tests and uploads
+# short-lived artifacts, and never pushes, tags or creates releases.
+#
+# The capture-replay tests (trunkd-p25 tests/site_fixture.rs, trunkd
+# tests/fixture_pipeline.rs) and the four clear-voice JMBE oracle tests in
+# trunkd-mbe need data that is not in the repository; their build scripts
+# mark them ignored, with the reason, when it is absent. CI passes with them
+# ignored. Keep CONTRIBUTING.md's "run what CI runs" list in step with this file.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux:
+    name: Linux (fmt, clippy, test, deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # rust-toolchain.toml selects the channel and the rustfmt/clippy components.
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Licenses, advisories, bans, sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans sources
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trunkd-linux-x86_64-${{ github.sha }}
+          path: target/release/trunkd
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows (release build, library tests)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # MSVC target; the vendored LAME source builds with cl.exe from the runner's
+      # Visual Studio install.
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Library tests
+        run: cargo test --workspace --lib --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trunkd-windows-x86_64-${{ github.sha }}
+          path: target/release/trunkd.exe
+          if-no-files-found: error
+          retention-days: 14
