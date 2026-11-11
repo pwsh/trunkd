@@ -20,7 +20,7 @@ cargo build --release
 sudo install -m 0755 target/release/trunkd /usr/local/bin/trunkd
 
 # 2. An account with access to the SDR (plugdev) and the PortaPack console (dialout)
-sudo useradd --system --home-dir /var/lib/trunkd --shell /usr/sbin/nologin \
+sudo useradd --system --home-dir /var/lib/trunkd --create-home --shell /usr/sbin/nologin \
      --groups plugdev,dialout trunkd
 
 # 3. The config. The directory is writable by trunkd because the local panel can
@@ -29,7 +29,7 @@ sudo useradd --system --home-dir /var/lib/trunkd --shell /usr/sbin/nologin \
 sudo install -d -o trunkd -g trunkd -m 0750 /etc/trunkd
 sudo install -o trunkd -g trunkd -m 0640 trunkd.example.toml /etc/trunkd/trunkd.toml
 sudoedit /etc/trunkd/trunkd.toml
-sudo -u trunkd /usr/local/bin/trunkd check --config /etc/trunkd/trunkd.toml
+sudo -u trunkd /usr/local/bin/trunkd --config /etc/trunkd/trunkd.toml check
 
 # 4. The unit
 sudo install -m 0644 scripts/systemd/trunkd.service /etc/systemd/system/

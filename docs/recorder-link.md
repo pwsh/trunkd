@@ -212,7 +212,7 @@ curl -s localhost:8080/api/status | jq .recorder      # effective settings + whe
       "grants_retried": 4, "grants_unacked": 1,
       "acks_grants": true,
       "claims": [
-        { "site": "Example County/Site 1", "frequency_hz": 852137500,
+        { "site": "Example County/Site 1", "frequency_hz": 851425000,
           "talkgroup": 1301, "tuner": "voice-1", "age_s": 1 }
       ]
     }

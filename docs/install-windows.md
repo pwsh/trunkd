@@ -8,7 +8,8 @@ the install layout; running it as a service, upgrading it and keeping its clock 
 ## 1. Get `trunkd.exe`
 
 **From a release.** Tagged releases on <https://github.com/pwsh/trunkd/releases> carry a Windows
-x64 `trunkd.exe`. You still need the SDR runtime (step 2).
+x64 zip with `trunkd.exe`. You still need the SDR runtime (step 2); the zip's `SDR-RUNTIME.txt`
+points back here.
 
 **From source.** Everything below runs in PowerShell.
 

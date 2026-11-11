@@ -16,7 +16,9 @@ What you need:
 ## 1. Get the binary
 
 **From a release.** Tagged releases on <https://github.com/pwsh/trunkd/releases> carry a Linux
-x86-64 binary. Download it, check it runs (`./trunkd --version`), and skip to step 2.
+x86-64 tarball: the binary, `trunkd.example.toml`, and the systemd unit with its notes under
+`systemd/` (use `systemd/trunkd.service` wherever this page says `scripts/systemd/trunkd.service`).
+Unpack it, check the binary runs (`./trunkd --version`), and skip to step 2.
 
 **From source.**
 

@@ -614,7 +614,7 @@ fn records_the_reference_capture_and_uploads_it() {
 
     // -- every call started was ended, uploaded, and nothing was lost -------
     // The call thread kept up with an unthrottled replay, so the orphan sweep
-    // (1a43715) had nothing to close: a call it closes here is one whose
+    // (60 s of silence closes a call) had nothing to close: a call it closes here is one whose
     // `Ended` went missing between the engine and the uploader.
     assert_eq!(summary.calls_started, 15, "the capture's 15 calls started");
     assert_eq!(summary.calls_ended, 15, "and all of them ended");

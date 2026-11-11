@@ -1,4 +1,4 @@
-# Non-voice data on a P25 Phase 1 L3Harris site
+# Non-voice data on an observed P25 Phase 1 system
 
 What the P25 engine already decodes off the air and the recorder throws away, how
 much of it there is, what it would tell an analyst, and what is worth keeping.
@@ -41,7 +41,7 @@ things:
 | `POST /api/recorder/observations` (every `observations_interval_s`, 300 s live) | `InventorySnapshot`: NAC/WACN/system/RFSS/site/LRA, live + secondary control channels, band plan, granted traffic frequencies with grant/call counts, adjacent sites, configured control candidates, TSBK rate |
 
 Everything else the engine decodes is dropped, and it is dropped in exactly one
-place. `SiteConfig::raw_control` is **already `true`** in production
+place. `SiteConfig::raw_control` is **already `true`** in the recorder
 (`pipeline/device.rs:119`), so every control-channel `P25Event` already crosses
 the bounded queue as an `ObsMsg` into the observations thread
 (`pipeline/device.rs:496`). There, `SiteInventory::observe`
@@ -186,7 +186,7 @@ WACN:BEE00 SYSTEM:3 ID:3000001   WACN:BEE00 SYSTEM:2 ID:2000005  … (+5)
 
 The two foreign systems (here 2 and 3) are exactly the neighbours the
 adjacent-site broadcasts announce. These are out-of-system radios working
-on our site — and Keyup's `radios` table already has `wacn` / `home_system_id`
+on the observed site — and Keyup's `radios` table already has `wacn` / `home_system_id`
 columns for precisely this, which today are always `0` because trunkd never sends
 them.
 
@@ -273,10 +273,10 @@ use. One exemplar per observation window is enough to notice the day they change
 **Low-speed data, TDULC call termination, LC group voice update on traffic.**
 Empty, redundant, redundant. Discard.
 
-**What we structurally cannot see:** every ISP (inbound, subscriber→FNE) message
+**What a downlink-only recorder structurally cannot see:** every ISP (inbound, subscriber→FNE) message
 — emergency alarm *requests*, registration *requests*, affiliation *requests*,
 status *updates from the field* — rides the uplink pair (−45 MHz on band 1) which
-the recorder never tunes. We only ever see the FNE's downlink responses. Any
+the recorder never tunes. It only ever sees the FNE's downlink responses. Any
 design that says "capture emergency alarms" must mean "capture the emergency bit
 in service options and the FNE's acknowledge/deny responses".
 

@@ -815,7 +815,7 @@ function bcfyLine(b) {
   if (!b.enabled) {
     return `${on(false)} <span class="dim">${b.allowed === false ? "refused by config" : "keyup has not enabled it"}</span>`;
   }
-  const counts = ["uploaded", "duplicate", "failed", "late", "claim_denied", "skipped", "skipped_no_speech"]
+  const counts = ["uploaded", "duplicate", "failed", "late", "claim_denied", "skipped", "skipped_no_speech", "skipped_conventional"]
     .map((k) => `${k} ${b[k] || 0}`).join(" · ");
   const last = b.last_response ? ` <span class="dim">last: ${esc(b.last_response)}</span>` : "";
   return `${on(true)} <span class="dim">${esc(counts)}</span>${last}`;

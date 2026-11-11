@@ -3,7 +3,7 @@
 # Copy this file and adjust it: to /etc/trunkd/trunkd.toml for the system
 # service, ~/.config/trunkd/trunkd.toml for the user service (both in
 # scripts/systemd/), or config/trunkd.toml when running from a checkout. Then
-# `trunkd check --config <file>` validates it and lists the radios it can see.
+# `trunkd --config <file> check` validates it and lists the radios it can see.
 #
 # It describes a FICTIONAL system, "Example System" / site "Example County": one
 # HackRF One (in a PortaPack) at 20 Msps centred on 855.0 MHz, recording a P25
@@ -319,7 +319,8 @@ notes = "Roof mount; the neighbouring building shades the west."
 [[site]]
 system = "Example System"
 site = "Example County"
-device = "hackrf0"
+# The tuners that serve this site ([[device]] ids).
+devices = ["hackrf0"]
 # Disabled sites stay in the config (toggled via the control API) but are not
 # decoded. The sdrtrunk importer preserves this rather than dropping entries.
 enabled = true
@@ -339,8 +340,6 @@ traffic_pool_size = 20
 # hang_ms = 2000
 # A call with no voice or signaling for this long is closed. Default 3000.
 # call_inactivity_ms = 3000
-# Phase 2 (TDMA) support wires up in build stage A6.
-phase2 = false
 
 # --- Conventional analog channels -----------------------------------------
 

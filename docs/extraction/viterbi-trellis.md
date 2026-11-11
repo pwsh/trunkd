@@ -1,11 +1,13 @@
-# P25 P1 Trellis/Viterbi (rate 1/2 & 3/4) — extraction
+# P25 Phase 1 trellis / Viterbi (rate 1/2 and 3/4) — porting notes
 
 > **Porting notes, derived from sdrtrunk.** These notes summarize how
 > [sdrtrunk](https://github.com/DSheirer/sdrtrunk) (© Dennis Sheirer, GPL-3.0)
 > implements this part of the P25 Phase 1 decoder, written while porting it to
 > `trunkd-p25`. Class, field and constant names refer to sdrtrunk's Java
 > sources. They are paraphrased facts, not copied source; trunkd is
-> GPL-3.0-or-later as well. See `NOTICE.md` for full attribution.
+> GPL-3.0-or-later as well. See `NOTICE.md` for full attribution. The
+> consolidated specification built from these notes is
+> [P25P1-SPEC.md](../P25P1-SPEC.md); the notes are terse by design.
 
 - **1/2-rate** (TSBK): 2-bit input / 4-bit output, 4-state transition matrix. 196 bits = 49 four-bit symbols → 96 bits.
 - **3/4-rate** (PDU confirmed data): 3-bit input / 4-bit output, 8-state matrix. 196 bits → 144 bits.

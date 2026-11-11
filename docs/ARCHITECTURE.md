@@ -77,7 +77,7 @@ One OS process, three thread domains:
   recorder link each own a thread. Slow consumers can never stall DSP — every channel crossing a domain boundary is
   bounded with an explicit drop-oldest or drop-and-count policy.
 - **Sites share a device's channelizer**: one polyphase channelizer per device, fed once per block, with every
-  site engine on that device taking its channels from it (fb5ab7d; four sites on one HackRF went from 1.05x to
+  site engine on that device taking its channels from it (four sites on one HackRF went from 1.05x to
   0.28x real time of DSP work).
 - **Conventional channels ride the same bank**: each enabled `[[channel]]` is one more subscription on its
   device's channelizer, drained by an NBFM engine after the site engines on the same DSP thread (no new threads). A
@@ -135,7 +135,7 @@ the wall clock:
   correction long or short.
 - Samples the ring drops are counted into stream time, drift is measured at the newest *produced* sample (not the
   newest consumed one, which lags under a backlog), and no stamp is ever written earlier than one before it on the
-  same stream (`StampFloor`, a3ca959).
+  same stream (`StampFloor`).
 
 Independently of the clock, the DSP thread counts how long it *waited* for each block (measured from the end of the
 previous block's processing, so it is the producer's gap and not our own work). A wait over `max(2 × block duration,
@@ -147,8 +147,8 @@ These rules are the direct answer to sdrtrunk's failure modes (unbounded `Dispat
 pool, synchronous listener fan-out): **no unbounded queue exists anywhere in trunkd, and nothing on a DSP thread ever
 blocks on the control plane.** The price is that a drop-oldest queue can evict a call-lifecycle message: evictions
 from the DSP → call-thread queue are counted (`calls.queue_dropped`), and a call whose end was evicted is closed by
-the call thread after 60 s of silence (`calls.orphaned`, 1a43715). A full uplink queue spools the call instead of
-dropping it (e84b8df).
+the call thread after 60 s of silence (`calls.orphaned`). A full uplink queue spools the call instead of
+dropping it.
 
 ## 3. Workspace layout
 
@@ -212,7 +212,7 @@ Cargo workspace, one binary:
   trunk-recorder-style JSON sidecar (which Keyup's file ingest already understands), then drained on reconnect.
   Spool has a size cap and a free-space floor with oldest-first eviction. While Keyup fails, a circuit breaker
   sends live calls straight to the spool; only Keyup's documented permanent answers delete a call, and an entry
-  that keeps failing is moved to `spool/quarantine/` (e84b8df).
+  that keeps failing is moved to `spool/quarantine/`.
   The worker also carries **direct-to-Broadcastify delivery**: when Keyup pushes a
   `recorder.broadcastify` block on the desired-state poll (and `[uplink] direct_broadcastify` has
   not vetoed it), each eligible finished call is registered with Broadcastify Calls and PUT there
@@ -230,7 +230,7 @@ Cargo workspace, one binary:
   and a PUT, and never reaches the feed. See [keyup.md](keyup.md#recorderbroadcastify--uploading-each-call-to-broadcastify-calls) for the wire
   contract.
 - **`trunkd-link`** — the recorder link: HMAC-authenticated UDP between trunkd instances for hellos, control-lock
-  state, grant hand-off (acked, retried) and call claims, with a per-sender replay window (a3ca959).
+  state, grant hand-off (acked, retried) and call claims, with a per-sender replay window.
 - **`trunkd-api`** — *not built as a crate.* The HTTP surface is the local panel in `trunkd` (see §5).
 - **`trunkd-supervisor`** — health model (see §6).
 
@@ -308,7 +308,7 @@ An in-process supervision tree, not an afterthought:
 - Escalation: component restart → device restart → process exit with distinct exit code, letting systemd
   (`Restart=on-failure`, `WatchdogSec` via sd-notify) or the Windows service recovery settings restart the process.
   *Status:* a device unit that spends its restart budget logs an error and keeps retrying every 30 s to 10 min
-  (the panel's restart button or a new Keyup version retries at once, ff6c182); nothing exits the process and there
+  (the panel's restart button or a new Keyup version retries at once); nothing exits the process and there
   is no sd-notify watchdog.
   The process is always safe to kill: no state matters except the spool, which is crash-safe (write temp + rename).
 - Keyup's `recorder_gaps` detection remains the independent outer safety net.
@@ -341,7 +341,7 @@ Rules it is built to:
 - **Never blocks the call thread.** Delivery is a `try_send` into a bounded 2 s queue per listener and drops on a
   full one; drops are counted (`monitor.dropped_frames`), never waited on.
 - **Never blocks the accept loop.** Every panel request runs on a thread of its own (at most 16 in flight, with
-  read/write time limits, 2424b15); the stream holds its thread only while it plays.
+  read/write time limits); the stream holds its thread only while it plays.
 - **Bounded.** Four concurrent streams, then 503. Each ticks on a 20 ms monotonic deadline, mixes simultaneous
   calls by saturating sum, emits a frame of silence when the site is idle (so the browser's decoder never sees
   the stream stall), and encodes incrementally through one long-lived LAME encoder at 32 kbps mono 8 kHz.

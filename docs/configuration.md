@@ -14,8 +14,8 @@ recorder on the same site in [recorder-link.md](recorder-link.md).
 * Linux: `/etc/trunkd/trunkd.toml` for the system service ([install-linux.md](install-linux.md)).
 * Windows: `C:\trunkd\config\trunkd.toml` for the service ([install-windows.md](install-windows.md)).
 
-The file holds your upload token, so keep it readable only by the account that runs trunkd
-(`chmod 0600` on Linux). The panel's device editor preserves the file's mode when it rewrites it.
+The file holds your upload token, so keep it out of reach of other users: on Linux the service
+install makes it mode `0640`, owned by `trunkd:trunkd` ([install-linux.md](install-linux.md)). The panel's device editor preserves the file's mode when it rewrites it.
 
 **Windows paths** in the TOML need forward slashes (`"C:/trunkd/spool"`) or doubled backslashes:
 `"C:\trunkd"` is a TOML escape error.
@@ -93,7 +93,7 @@ a startup error rather than a recorder that hunts forever in silence.
 | `desired_prefetch_timeout_s` | `3` | How long to wait for the server's desired state before building the tuners. `0` disables the prefetch. |
 | `stream` | `true` | Hold a WebSocket push channel open to Keyup so desired-state changes land at once. |
 | `stream_reconnect_max_s` | `30` | Ceiling on that channel's reconnect backoff (it doubles from 1 s). |
-| `direct_broadcastify` | `true` | May this box upload to Broadcastify Calls itself when Keyup pushes credentials? A veto, not a trigger: nothing happens until Keyup sends a `recorder.broadcastify` block. |
+| `direct_broadcastify` | `true` | May this box upload to Broadcastify Calls itself when Keyup pushes credentials? A veto, not a trigger: nothing happens until Keyup sends a `recorder.broadcastify` block. Trunked (P25) calls only: conventional `[[channel]]` calls are never sent there. |
 
 Pointing `url` at a plain Rdio Scanner server rather than Keyup works for call upload; see
 [keyup.md](keyup.md) for which settings to turn off.
@@ -170,7 +170,12 @@ knobs:
 | `enabled` | `true` | A disabled site stays in the file but is not decoded. |
 | `control_frequencies` | `[]` | Control-channel candidates, in Hz. All are decoded at once; the first to yield five valid TSBKs under a consistent NAC wins, so order is preference only. |
 | `traffic_pool_size` | `20` | Simultaneous traffic channels this site may follow. Raise it if the log says `traffic pool exhausted`. |
+| `hang_ms` | `2000` | How long a traffic channel stays subscribed after a call ends, so a follow-on transmission on the same frequency is caught in full. |
+| `call_inactivity_ms` | `3000` | A call with no voice or signaling for this long is closed. |
 | `data_follow` | `false` | Follow SNDCP data-channel grants as well as voice. |
+
+`phase2 = false` may appear in older files or ones the panel has rewritten. It is accepted and
+has no effect: trunkd decodes P25 Phase 1 only.
 
 Where to get the control frequencies: RadioReference's page for your system lists every site's
 control channels, and an sdrtrunk playlist carries them too (`trunkd import-sdrtrunk`). Keyup can
@@ -182,7 +187,9 @@ An analog NBFM frequency — a fire dispatch, a school-bus channel — recorded 
 channel is cut out of a tuner's capture by the same channelizer the sites use, so a tuner can
 carry a P25 site and channels at once, or channels alone (a config with channels and no
 `[[site]]` is valid). Each call is uploaded as a **group call** under (`system`, `talkgroup`)
-with `name` as the talkgroup label.
+with `name` as the talkgroup label. Conventional calls are **never** sent to Broadcastify Calls
+(it accepts trunked-system calls only), whatever Keyup's talkgroup list says; they go to Keyup as
+usual.
 
 ```toml
 [[device]]

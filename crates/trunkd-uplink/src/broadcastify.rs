@@ -45,7 +45,14 @@
 //! above -40 dBFS (default 0.25 s — the floor Keyup classifies with) never
 //! reaches the claim, let alone the wire, and is `skipped` with `no speech
 //! (0.04 s)`. A mic click is not a call.
+//!
+//! Broadcastify Calls takes trunked-system calls only, so a call recorded from
+//! a conventional `[[channel]]` (analog NBFM) is never offered, whatever the
+//! talkgroup list says: it is `skipped` with `conventional channel (not a
+//! trunked call)`, counted as `skipped_conventional`, and logged once per
+//! channel at INFO.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -205,6 +212,9 @@ struct Counters {
     /// feed is quiet because keyup turned the talkgroup off" look identical
     /// from one `skipped` number.
     skipped_no_speech: Metric,
+    /// The subset of `skipped` that were conventional-channel calls, which
+    /// Broadcastify Calls does not accept at all.
+    skipped_conventional: Metric,
 }
 
 impl Counters {
@@ -217,6 +227,7 @@ impl Counters {
             claim_denied: m.counter("broadcastify.claim_denied"),
             skipped: m.counter("broadcastify.skipped"),
             skipped_no_speech: m.counter("broadcastify.skipped_no_speech"),
+            skipped_conventional: m.counter("broadcastify.skipped_conventional"),
         }
     }
 
@@ -247,6 +258,9 @@ pub struct BroadcastifyState {
     block: RwLock<Option<BroadcastifyDirect>>,
     counters: Counters,
     last: Mutex<Last>,
+    /// Conventional channels (by frequency) already logged as never going to
+    /// Broadcastify, so the INFO line appears once per channel, not per call.
+    conventional_logged: Mutex<HashSet<u64>>,
 }
 
 #[derive(Default)]
@@ -272,6 +286,7 @@ impl BroadcastifyState {
             block: RwLock::new(None),
             counters: Counters::new(metrics),
             last: Mutex::new(Last::default()),
+            conventional_logged: Mutex::new(HashSet::new()),
         })
     }
 
@@ -358,12 +373,24 @@ impl BroadcastifyState {
         if is_no_speech(outcome) {
             self.counters.skipped_no_speech.inc();
         }
+        if is_conventional(outcome) {
+            self.counters.skipped_conventional.inc();
+        }
         let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
         last.response = Some(match &outcome.response {
             Some(r) => format!("{}: {r}", outcome.outcome),
             None => outcome.outcome.clone(),
         });
         last.at_ms = Some(at_ms);
+    }
+
+    /// Whether this is the first conventional call seen on the channel at
+    /// `frequency_hz` (and remember that it no longer is).
+    fn first_conventional(&self, frequency_hz: u64) -> bool {
+        self.conventional_logged
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(frequency_hz)
     }
 
     /// The panel's `broadcastify` object.
@@ -386,6 +413,7 @@ impl BroadcastifyState {
             "claim_denied": self.counters.claim_denied.get(),
             "skipped": self.counters.skipped.get(),
             "skipped_no_speech": self.counters.skipped_no_speech.get(),
+            "skipped_conventional": self.counters.skipped_conventional.get(),
             "last_response": last.response.clone(),
             "last_at": last.at_ms,
         })
@@ -508,14 +536,21 @@ impl BroadcastifyHttp for Agents {
 
 /// Why a call is not offered to Broadcastify at all, or `None` when it is.
 ///
-/// Encrypted calls have no audio, unit-to-unit calls have no talkgroup to file
-/// under, and a `talkgroups` list is an allow-list.
+/// Conventional-channel calls are not trunked and Broadcastify Calls takes
+/// trunked calls only, encrypted calls have no audio, unit-to-unit calls have
+/// no talkgroup to file under, and a `talkgroups` list is an allow-list.
 pub fn ineligible(
     cfg: &BroadcastifyDirect,
     call: &FinishedCall,
     audio: Option<&[u8]>,
     format: AudioFormat,
 ) -> Option<String> {
+    // First, and independent of the talkgroup list: a `[[channel]]` call is
+    // never a Broadcastify Calls call, even when its synthetic talkgroup
+    // happens to be listed.
+    if call.conventional.is_some() {
+        return Some(CONVENTIONAL.to_owned());
+    }
     if call.encrypted {
         return Some("encrypted call".to_owned());
     }
@@ -547,6 +582,15 @@ pub fn ineligible(
 /// The prefix every speech-gate refusal's response carries, which is also how
 /// [`is_no_speech`] tells one from the other reasons a call is `skipped`.
 const NO_SPEECH: &str = "no speech ";
+
+/// The response of every conventional-channel refusal, which is also how
+/// [`is_conventional`] tells it from the other reasons a call is `skipped`.
+const CONVENTIONAL: &str = "conventional channel (not a trunked call)";
+
+/// Whether an outcome is the conventional-channel `skipped`.
+fn is_conventional(outcome: &BroadcastifyOutcome) -> bool {
+    outcome.outcome == "skipped" && outcome.response.as_deref() == Some(CONVENTIONAL)
+}
 
 /// Whether an outcome is the speech gate's own `skipped`.
 fn is_no_speech(outcome: &BroadcastifyOutcome) -> bool {
@@ -778,6 +822,15 @@ impl BroadcastifyUploader {
         let cfg = self.state.snapshot()?;
         let outcome = self.decide(&cfg, call, audio, held, now_ms);
         self.state.record(&outcome, now_ms);
+        if is_conventional(&outcome) && self.state.first_conventional(call.frequency_hz) {
+            tracing::info!(
+                system = %call.system,
+                talkgroup = call.talkgroup,
+                frequency_hz = call.frequency_hz,
+                "conventional channel calls are never sent to broadcastify calls \
+                 (it accepts trunked calls only); logged once per channel"
+            );
+        }
         match outcome.outcome.as_str() {
             // Debug like Keyup's own success line (worker.rs): per call, and
             // counted on the status line; a refusal still warns.
@@ -1574,6 +1627,65 @@ mod tests {
             .expect("the feature is on");
         assert_eq!(rig.up.state.status_json()["skipped"], 1);
         assert_eq!(rig.up.state.status_json()["skipped_no_speech"], 0);
+    }
+
+    /// A conventional-channel call is never offered to Broadcastify Calls,
+    /// which takes trunked calls only — not in the default every-group-call
+    /// mode, and not even when its talkgroup is on the list — while a P25 call
+    /// on the same block still registers and uploads.
+    #[test]
+    fn a_conventional_call_is_never_uploaded_and_a_p25_call_still_is() {
+        let at = 1_788_012_000_000i64;
+        let conventional = |freq: u64| {
+            let mut b = CallBuilder::new("Example Fire", "Analog", at, freq, 1);
+            b.set_conventional(Some(trunkd_call::ConventionalInfo::nbfm()));
+            b.push_pcm(&loud(16_000));
+            b.finish(at + 2000)
+        };
+        let conv = conventional(154_340_000);
+
+        // Every-group-call mode (`talkgroups: None`) and an allow-list naming
+        // the channel's talkgroup both refuse it.
+        for cfg in [
+            block(),
+            BroadcastifyDirect {
+                talkgroups: Some(vec![1]),
+                ..block()
+            },
+        ] {
+            assert_eq!(
+                ineligible(&cfg, &conv, Some(b"mp3"), AudioFormat::default()).as_deref(),
+                Some("conventional channel (not a trunked call)")
+            );
+        }
+
+        let http = Fake::new()
+            .with_form(200, "0 https://audio.broadcastify.com/upload/abc123")
+            .with_put(200);
+        let rig = uploader(state_with(Some(block())), http);
+        for call in [&conv, &conv, &conventional(155_340_000)] {
+            let out = rig
+                .up
+                .attempt(call, Some(b"mp3"), false, at + 2500)
+                .expect("the feature is on");
+            assert_eq!(out.outcome, "skipped");
+        }
+        assert!(rig.seen().is_empty(), "sent {:?}", rig.seen());
+        let status = rig.up.state.status_json();
+        assert_eq!(status["skipped"], 3);
+        assert_eq!(status["skipped_conventional"], 3);
+        assert_eq!(status["skipped_no_speech"], 0);
+
+        // The P25 call on the same block goes on the wire as before.
+        let out = rig
+            .up
+            .attempt(&sample_call(), Some(b"mp3"), false, at + 2500)
+            .expect("the feature is on");
+        assert_eq!(out.outcome, "uploaded");
+        assert_eq!(rig.seen().len(), 2, "register then PUT");
+        let status = rig.up.state.status_json();
+        assert_eq!(status["uploaded"], 1);
+        assert_eq!(status["skipped_conventional"], 3);
     }
 
     #[test]

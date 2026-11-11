@@ -1,12 +1,20 @@
 # P25 Phase 1 Decoder — Implementation Specification
 
-**Purpose.** This document is a standalone, recreation-grade specification of a P25 Phase 1
+> **What this is.** Implementation notes for the P25 Phase 1 receive chain in
+> `crates/trunkd-p25`, derived from how
+> [sdrtrunk](https://github.com/DSheirer/sdrtrunk) (© Dennis Sheirer, GPL-3.0)
+> implements the same decoder, down to its constants, tables and state machines.
+> Names of sdrtrunk's Java classes and constants appear throughout; the content
+> is paraphrased facts, not copied source. See [`NOTICE.md`](../NOTICE.md) for
+> full attribution. trunkd's own deviations and resolved ambiguities are in §17
+> and in [SPEC-GAPS.md](SPEC-GAPS.md).
+
+**Purpose.** This document is a standalone, detailed specification of a P25 Phase 1
 (C4FM and LSM/simulcast) receive-side decoder: complex baseband IQ in, decoded trunking
-messages / voice frames / call events out. It was extracted from a working reference
-implementation (sdrtrunk, Java) by direct source audit, with every constant, lookup table,
-polynomial, and state machine reproduced exactly. An engine built purely from this document —
-without consulting any other source — must achieve decode parity with the reference on real
-signals.
+messages / voice frames / call events out. It was written from a working reference
+implementation (sdrtrunk, Java) by reading its source, with every constant, lookup table,
+polynomial, and state machine given exactly. The goal is that an engine built from this
+document alone reaches decode parity with the reference on real signals.
 
 **Scope.** Demodulation (C4FM and LSM), sync/framing, NID/BCH, all Phase 1 EDAC codes,
 interleaving, TSBK/PDU/HDU/LDU/TDU message assembly, trunking-control message layouts needed
@@ -14,10 +22,10 @@ for voice-channel following (grants + IDEN/frequency-band), channel→frequency 
 traffic-channel tracking state machine. IMBE voice decode internals (the 144-bit frame's
 inner deinterleave/Golay/Hamming/derandomize) are **out of scope**: the reference hands raw
 144-bit frames to an external vocoder library at exactly the boundary specified in §12, and
-this engine must do the same.
+trunkd does the same.
 
-**Priority note.** The target system is an LSM (linear simulcast, CQPSK) network. The LSM
-demodulator (§6) is the primary path; C4FM (§5) is required for completeness.
+**Priority note.** trunkd was developed against an LSM (linear simulcast, CQPSK) network, so
+the LSM demodulator (§6) is the primary path; C4FM (§5) is covered for completeness.
 
 ---
 
@@ -102,12 +110,12 @@ amplitude `= (10^(dB/20) − 1)/(10^(dB/20) + 1)`; band weight `= 1/(rippleAmp/m
 
 The wider LSM filter is deliberate and load-bearing (simulcast spectra are wider).
 
-### 3.3 Root-raised-cosine matched filter — **critical quirk**
+### 3.3 Root-raised-cosine matched filter (with the reference's sps-halving quirk)
 Applied separately to I and Q. Parameters: nominal `sps = decimatedRate/4800`,
 `span = 16 symbols`, `alpha = 0.2`, GNU-Radio `firdes` RRC tap formula, taps normalized to
 unity DC gain (sum-normalized).
 
-**QUIRK (must replicate):** the reference's RRC generator *halves the samples-per-symbol
+**Quirk, replicated on purpose:** the reference's RRC generator *halves the samples-per-symbol
 internally* before computing taps. With decimatedRate 25000 it designs for
 `sps = 2.604166`, giving `taps = round(2.604166 × 16) = 42` taps (not 83). This is a
 documented historical mistake retained for compatibility; the P25 path inherits it. A

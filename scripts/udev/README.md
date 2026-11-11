@@ -21,7 +21,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG plugdev "$USER"   # only for running trunkd as yourself; log in again
 ```
 
-Then unplug and replug the radio and check with `trunkd check --config <file>`, which
+Then unplug and replug the radio and check with `trunkd --config <file> check`, which
 lists every SDR it can enumerate.
 
 ## If your distribution has no rule

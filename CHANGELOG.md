@@ -5,6 +5,18 @@ All notable changes to trunkd are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Until 1.0, minor versions may
 change configuration or behaviour; the entry says how.
 
+## [0.2.2] - 2026-11-11
+
+- Direct Broadcastify Calls upload no longer sends conventional `[[channel]]`
+  calls: Broadcastify Calls accepts trunked-system calls only, and in the
+  default every-group-call mode the analog calls went up too. They are now
+  always `skipped` (`conventional channel (not a trunked call)`), whatever the
+  talkgroup list says, counted as `broadcastify.skipped_conventional` (panel:
+  `skipped_conventional`) and logged once per channel. P25 uploads are
+  unchanged.
+- Release archives include the systemd unit and its README (Linux) and an SDR
+  runtime note (Windows). Public documentation edited for outside readers.
+
 ## [0.2.1] - 2026-11-11
 
 - Tests: temp-directory paths in test configs are TOML literal strings, so the

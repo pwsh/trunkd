@@ -525,7 +525,7 @@ fn decodes_the_reference_site_from_a_wideband_capture() {
     );
 
     // Talker aliases (L3Harris LC 50–53). Published only once the 14-octet
-    // field is known complete (153fe58): a NUL in the first half, or both
+    // field is known complete: a NUL in the first half, or both
     // halves. Seven complete aliases: six end inside their first half (one of
     // them twice, from the same radio), one arrives with both. The capture's
     // aliases are real unit names, so the source pins the sorted list by

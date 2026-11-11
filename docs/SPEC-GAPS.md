@@ -1,4 +1,12 @@
-# P25P1-SPEC.md — gaps, ambiguities, and resolutions
+# P25 Phase 1 specification: gaps, ambiguities, and resolutions
+
+> **What this is.** A companion to [P25P1-SPEC.md](P25P1-SPEC.md), the
+> implementation notes for trunkd's P25 Phase 1 decoder, which are themselves
+> derived from how [sdrtrunk](https://github.com/DSheirer/sdrtrunk)
+> (© Dennis Sheirer, GPL-3.0) implements it. This file records where those
+> notes turned out to be wrong, ambiguous or silent when `crates/trunkd-p25`
+> was built from them, and what trunkd does instead. Section references (§)
+> point into P25P1-SPEC.md. See [`NOTICE.md`](../NOTICE.md) for attribution.
 
 Findings from the clean-room implementation of `crates/trunkd-p25` built
 solely from `docs/P25P1-SPEC.md`. Each entry records the ambiguity, the
@@ -126,12 +134,13 @@ BCH false accept; a decoded NAC of 0 never becomes the system NAC.
 Band edges per spec (C4FM 5200/6500, LSM 7250/8000) and the ripple-derived
 ≈64.8 dB stopband are honored; tap values differ from a true Parks-McClellan
 design. Frequency-response assertions in unit tests confirm the edges.
-(The task brief allowed "an equivalent equiripple/windowed design meeting
-the stated band edges — document your choice"; this is that documentation.)
+The clean-room build allowed any equivalent equiripple or windowed design
+that meets the stated band edges, provided the choice was documented; this
+is that record.
 
 ### 12. C4FM: single correlator + linear interpolation (§5, §15)
-The dual sync correlator, 128-phase MMSE interpolator (whose verbatim table
-the spec does not include and outside sources are off-limits) and the exact
+The dual sync correlator, 128-phase MMSE interpolator (whose table the spec
+does not reproduce, and the clean-room build used no other source) and the exact
 coordinate hill-climb are replaced by a single correlator on equalized soft
 samples with linear interpolation and a coarse(sps/8)/fine(sps/16) local
 timing search — the §15-sanctioned simplification. All specified equalizer

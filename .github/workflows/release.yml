@@ -105,6 +105,26 @@ jobs:
           cp LICENSE NOTICE.md README.md CHANGELOG.md trunkd.example.toml "dist/$name/"
           # Generated at release time (cargo about); ship it when the tree has it.
           if [ -f THIRD-PARTY.md ]; then cp THIRD-PARTY.md "dist/$name/"; fi
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # The SDR runtime is not bundled; say where to get it.
+            cat > "dist/$name/SDR-RUNTIME.txt" <<'EOF'
+          trunkd.exe drives HackRF radios directly, but Airspy, SDRplay and RTL-SDR
+          radios go through SoapySDR, which is not included in this zip.
+
+          Provide it in one of two ways:
+            * the self-contained bundle built by scripts\windows\build-redist.ps1
+              from the trunkd source, placed beside trunkd.exe (recommended); or
+            * PothosSDR, with its bin directory on PATH.
+
+          Drivers (WinUSB via Zadig), the VC++ runtime, the SDRplay API service and
+          the HackRF tools are listed in docs/install-windows.md, section 2:
+          https://github.com/pwsh/trunkd/blob/main/docs/install-windows.md
+          EOF
+          else
+            # The systemd unit and its install notes (docs/install-linux.md).
+            mkdir -p "dist/$name/systemd"
+            cp scripts/systemd/trunkd.service scripts/systemd/README.md "dist/$name/systemd/"
+          fi
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a -tzip "$name.zip" "$name" > /dev/null

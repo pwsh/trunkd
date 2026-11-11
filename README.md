@@ -67,16 +67,16 @@ sudo apt install build-essential git curl        # a C compiler builds the vendo
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/pwsh/trunkd.git && cd trunkd
 cargo build --release                            # rust-toolchain.toml picks the toolchain
-cp trunkd.example.toml trunkd.toml && chmod 600 trunkd.toml
+cp trunkd.example.toml trunkd.toml && chmod 640 trunkd.toml
 $EDITOR trunkd.toml                              # your SDR, site control channels, [uplink] url + token
 ./target/release/trunkd --config trunkd.toml check   # validates the config and lists the SDRs it sees
 ./target/release/trunkd --config trunkd.toml run
 ```
 
-Release builds for Linux x86-64 and Windows x64 are attached to each
-[GitHub release](https://github.com/pwsh/trunkd/releases). To run trunkd as a
-service, install the SDR runtime and set up real-time priority, follow
-[docs/install-linux.md](docs/install-linux.md) or
+Releases are published by the maintainer on the
+[releases page](https://github.com/pwsh/trunkd/releases), with Linux x86-64 and Windows x64
+binaries. To run trunkd as a service, install the SDR runtime and set up real-time priority,
+follow [docs/install-linux.md](docs/install-linux.md) or
 [docs/install-windows.md](docs/install-windows.md).
 
 ## Documentation
@@ -134,4 +134,4 @@ JTransforms; their notices, and the note on the expired IMBE patents, are in
 You are responsible for knowing whether receiving, recording or publishing
 radio traffic is legal where you are.
 
-<sub>Source revision: `c72f95e54978`</sub>
+<sub>Source revision: `3fb4ce5429ce`</sub>

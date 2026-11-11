@@ -137,7 +137,10 @@ The three measurements carry one decimal and are absent when not measured. `dura
 there is no vocoder). Keyup keeps the new fields in `raw_meta`; a server that does not know them
 ignores them. The spool sidecar carries the same extras under the same names, with
 `"audio_type": "analog"` (trunk-recorder's word; P25 calls stay `digital`), so a call retried out of
-the spool is retried with them. `[recorder] skip_talkgroups` never applies to these calls.
+the spool is retried with them. `[recorder] skip_talkgroups` never applies to these calls. They are
+never sent to Broadcastify Calls, which accepts trunked-system calls only (see
+[`recorder.broadcastify`](#recorderbroadcastify--uploading-each-call-to-broadcastify-calls)); the push carries
+`broadcastifyOutcome=skipped` for them when the feature is on.
 
 ### `sourceQuality` — which recorder heard this, and how well
 
@@ -762,6 +765,13 @@ registered with Broadcastify twice**. Encrypted calls (no audio), unit-to-unit c
 talkgroup), talkgroups outside the list, calls with less than `min_speech_s` of speech, and a held
 uplink are `skipped` with a short reason. The speech gate's own refusals are also counted as
 `skipped_no_speech` in the panel's `broadcastify` block.
+
+**Conventional calls are never sent.** Broadcastify Calls accepts trunked-system calls only, so a
+call recorded from a conventional `[[channel]]` is `skipped` with `conventional channel (not a
+trunked call)` before anything else is checked — in every-group-call mode and even when its
+talkgroup is on the list. Such calls are counted as `skipped_conventional` in the panel's
+`broadcastify` block (metric `broadcastify.skipped_conventional`) and logged once per channel at
+INFO. They still go to Keyup as usual.
 
 Broadcastify's terms of service apply to whatever you upload; read them before enabling this.
 

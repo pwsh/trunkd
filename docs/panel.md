@@ -322,8 +322,8 @@ meaning or disappears; **adding** a field does not bump it.
   // Stamped in at compile time by crates/trunkd/build.rs.
   "build": {
     "version": "0.0.1",                  // crate version
-    "git_sha": "1248695e5cd8",           // short sha, or "unknown" with no git
-    "git_describe": "1248695-dirty",
+    "git_sha": "3f2c9a1b7d40",           // short sha, or "unknown" with no git
+    "git_describe": "3f2c9a1-dirty",
     "git_dirty": true,                   // true | false | "unknown" (no git to ask: tarball build)
     "built_at": "2026-01-15T19:12:28Z",  // RFC 3339 UTC; honours SOURCE_DATE_EPOCH
     "built_on": "build-host",            // machine that ran the build
