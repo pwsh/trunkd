@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/trunkd",
+    "crates/trunkd-analog",
     "crates/trunkd-call",
     "crates/trunkd-core",
     "crates/trunkd-mbe",
@@ -13,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.98"
 license = "GPL-3.0-or-later"
@@ -27,6 +28,7 @@ publish = false
 # Shared dependency versions. Individual crates opt in via `workspace = true`.
 [workspace.dependencies]
 # Internal crates
+trunkd-analog = { path = "crates/trunkd-analog" }
 trunkd-core = { path = "crates/trunkd-core" }
 trunkd-mbe = { path = "crates/trunkd-mbe" }
 trunkd-p25 = { path = "crates/trunkd-p25" }
@@ -118,4 +120,7 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.trunkd-call]
+opt-level = 3
+
+[profile.test.package.trunkd-analog]
 opt-level = 3

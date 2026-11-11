@@ -47,7 +47,7 @@ pub use audio::{
     encode_audio, encode_mp3, encode_wav, mp3_encoder_version, AudioError, AudioFormat, Mp3Stream,
 };
 pub use call::{
-    speech_seconds, BroadcastifyOutcome, CallBuilder, CallKind, FinishedCall, FrequencySegment,
-    SourceQuality, SourceSegment, PCM_RATE, SPEECH_FLOOR_DBFS,
+    speech_seconds, BroadcastifyOutcome, CallBuilder, CallKind, ConventionalInfo, FinishedCall,
+    FrequencySegment, SourceQuality, SourceSegment, WireValue, PCM_RATE, SPEECH_FLOOR_DBFS,
 };
-pub use sidecar::sidecar_json;
+pub use sidecar::{conventional_from_sidecar, sidecar_json};

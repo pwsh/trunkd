@@ -1,7 +1,7 @@
 # trunkd — Architecture
 
 trunkd is a P25 trunked-radio recorder engine written in Rust. It owns everything between the SDR hardware and a
-finished call: tuner management, channelization, P25 Phase 1/2 and analog NBFM/AM decoding, voice synthesis, call
+finished call: tuner management, channelization, P25 Phase 1 and analog NBFM decoding, voice synthesis, call
 assembly, and delivery to [Keyup](https://github.com/pwsh/keyup) over the Rdio-Scanner upload contract that
 Keyup already implements (`POST /api/call-upload`, its ARCHITECTURE.md §1.6/§1.7). It replaces
 [sdrtrunk](https://github.com/DSheirer/sdrtrunk) for the recording role; sdrtrunk (and
@@ -17,10 +17,11 @@ Targets: Linux x86_64 (systemd service), Windows 10/11 x64 (Windows service), Li
 Everything downstream of "a call exists" — archive layout, search, transcription, playback, users/roles, alerts,
 retention, statistics — is Keyup's job and is deliberately **not** implemented here.
 
-> **Status (checked against the code 2026-09-23).** This document began as the design. Built today: P25 Phase 1
-> (C4FM and LSM) control and traffic decode, IMBE voice, call assembly, the Keyup and Broadcastify uplinks, the
-> recorder link, the local panel. **Not built:** P25 Phase 2 / TDMA voice (`[[site]] phase2` is a stub), AMBE,
-> analog NBFM/AM conventional channels (`[[channel]]` is parsed and skipped), the `/api/v1` control API of §5.
+> **Status (checked against the code 2026-11-11).** This document began as the design. Built today: P25 Phase 1
+> (C4FM and LSM) control and traffic decode, IMBE voice, analog NBFM conventional channels (`[[channel]]`, with
+> CTCSS/DCS tone squelch or carrier squelch), call assembly, the Keyup and Broadcastify uplinks, the recorder link,
+> the local panel. **Not built:** P25 Phase 2 / TDMA voice (`[[site]] phase2` is a stub), AMBE, AM channels
+> (`mode = "am"` is parsed and skipped with a warning), DMR and NXDN, the `/api/v1` control API of §5.
 > Sections below carry a *Status* note where the code differs from the design.
 
 ---
@@ -43,7 +44,8 @@ sdrtrunk mixes radio engine, archive, and desktop UI in one JVM. trunkd regroups
 | Local audio playback through sound card | dropped; the panel serves an **opt-in monitor stream** instead | listening to *calls* stays in Keyup's web player — `[server] live_audio` exists to answer "is what this box decodes intelligible?" |
 | JVM heap tuning, diagnostic reports | **trunkd supervision** | health model designed-in, not bolted on |
 
-Non-goals: DMR/NXDN/LTR/MPT1327/Passport (P25 P1+P2 and analog NBFM/AM only), transmitting, alias actions
+Non-goals: DMR/NXDN/LTR/MPT1327/Passport (P25 P1+P2 and analog NBFM/AM only; of these, P25 Phase 1 and NBFM are
+built), transmitting, alias actions
 (beep/clip/script), desktop GUI.
 
 ## 2. Process model and dataflow
@@ -77,6 +79,11 @@ One OS process, three thread domains:
 - **Sites share a device's channelizer**: one polyphase channelizer per device, fed once per block, with every
   site engine on that device taking its channels from it (fb5ab7d; four sites on one HackRF went from 1.05x to
   0.28x real time of DSP work).
+- **Conventional channels ride the same bank**: each enabled `[[channel]]` is one more subscription on its
+  device's channelizer, drained by an NBFM engine after the site engines on the same DSP thread (no new threads). A
+  device with channels and no site builds the bank from its own rate and centre. Call events cross to the call
+  thread on the same bounded queue as P25 calls, whose depth grows by 8 per enabled channel (unchanged without
+  channels).
 - **One control-channel stream per site**: every tuner serving a site runs its own engine on the control channel
   (an auto front hunts and locks it as well as the control front), so with two tuners each TSBK reaches the
   observations thread twice, stamped by two stream clocks. That thread folds one tuner's stream — the first to
@@ -177,8 +184,21 @@ Cargo workspace, one binary:
   (BCH(63,16,23), Golay 23/24, Hamming 10/15, RS 24,12 / 24,16 / 63,35 over GF(64), 1/2 & 3/4 trellis), TSBK/PDU/MAC
   parsing, and the trunking manager (control-channel following, grant → recorder-channel allocation from a bounded
   pool, patch tracking, continue/teardown logic — port of `P25TrafficChannelManager` behavior).
-- **`trunkd-analog`** — *not built.* Planned: NBFM/AM demod, squelch-gated call segmentation for conventional
-  channels.
+- **`trunkd-analog`** — analog NBFM for conventional `[[channel]]`s. Each enabled channel subscribes one centre on
+  its device's channelizer bank (the same bank the P25 sites draw from, so a channel costs a 25 ksps stream, not a
+  tuner) and runs an `NbfmChannel` engine on that device's DSP thread: a channel filter (off-grid channels take the
+  bank's two-bin path, and the filter rejects 7.5 kHz-spaced neighbours), a power squelch against a tracked noise
+  floor with a discriminator-noise veto, a polar discriminator, and two paths off it — sub-audio decimated to
+  2.5 ksps into a CTCSS detector (the 50-tone table) and a DCS detector (Golay(23,12), all 104 codes, either
+  polarity), and audio through a 300 Hz high-pass, de-emphasis and a 3.2 kHz low-pass resampled to 8 kHz i16 in 20 ms
+  frames, the same PCM the IMBE path produces. A segmenter turns squelch and tone into calls: with a `tone`, audio
+  is held from carrier-up until the tone confirms (`tone_timeout_ms`), so a call starts at the carrier, and a
+  carrier with the wrong tone or none is discarded and counted as a tone mismatch; without one, the carrier alone
+  opens it. Kerchunks under `min_call_ms` are dropped, transmissions over `max_call_s` are split. The engine emits
+  `Started → Pcm* → Ended`; the call thread builds the call as for P25 and it uploads as a **group call** with the
+  channel's system, site, talkgroup and name, plus the analog extras (`mode`, `decoder`, `tone`, `toneDetected`,
+  `squelchReason`, `snrDb`, `peakDeviationHz`, `offsetHz`; [keyup.md](keyup.md#conventional-analog-channel-calls)).
+  Nothing is built, subscribed or iterated when the config has no channels. *Status:* NBFM only; AM is not built.
 - **`trunkd-mbe`** — IMBE (144-bit) and AMBE 3600×2450 (72-bit) frame decode → 8 kHz PCM; port of JMBE with its
   spec-algorithm structure preserved (auditable against the spec). GPL-3.0-or-later like JMBE; the IMBE patents have
   expired (`NOTICE.md`), so release binaries include it. *Status:* IMBE only; there is no AMBE decoder and no
@@ -299,7 +319,7 @@ One TOML file (`trunkd.toml`), env-var overrides (`TRUNKD_*`), reload via the pa
 or a Keyup desired-state change (no SIGHUP handler). Sections:
 `[server]` (bind, tokens), `[uplink]` (Keyup URL, API key, spool path/cap), `[[device]]` (driver args, sample
 rate, gain, ppm), `[[site]]` (system/site labels, control + alternate frequencies, traffic pool size, phase 2
-options), `[[channel]]` (conventional NBFM/AM channels), `[health]` (thresholds). A `--check` mode validates config
+options), `[[channel]]` (conventional analog channels: NBFM; `mode = "am"` is skipped), `[health]` (thresholds). A `--check` mode validates config
 and device availability and exits.
 
 ### 7.1 Live audio monitor (`[server] live_audio`)
@@ -340,6 +360,11 @@ Rules it is built to:
 - **Voice parity**: `.mbe` JSON call sequences from sdrtrunk decoded by `trunkd-mbe` and compared (within tolerance)
   to JMBE output WAVs.
 - **Uplink contract tests** against a local Keyup instance (its `/api/call-upload` responses are the spec).
+- **Synthetic analog tests** (no capture needed): `trunkd-analog`'s `testsig` feature modulates NBFM with CTCSS/DCS
+  at a chosen SNR and offset for the detector, squelch and segmenter tests, and
+  `crates/trunkd/tests/conventional_pipeline.rs` writes a 2 Msps CF32 capture with four keyed carriers (CTCSS, DCS,
+  carrier squelch, and a wrong tone that must not record), replays it through `run_once` against a mock Keyup and
+  checks every upload's fields and MP3 length. It runs in every `cargo t` in a few seconds.
 - End-to-end soak: `iqfile` in a loop for hours under valgrind/heaptrack once per release; RSS must be flat.
 
 ## 9. Build order
@@ -352,4 +377,5 @@ Rules it is built to:
 5. **A4** — `trunkd-mbe` IMBE + `trunkd-call` + `trunkd-uplink` (first live call lands in Keyup).
 6. **A5** — `trunkd-api` + full supervision + systemd/Windows service packaging.
 7. **A6** — P25 Phase 2 (HDQPSK/TDMA), Phase 1 LSM, AMBE, analog NBFM/AM, polyphase channelizer optimization.
+   *Status:* Phase 1 LSM, analog NBFM and the polyphase channelizer are built; Phase 2, AMBE and AM are not.
 8. **A7** — Keyup Admin “Recorder” page (in the Keyup repo) consuming the control API.

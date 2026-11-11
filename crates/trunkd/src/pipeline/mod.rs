@@ -41,6 +41,7 @@
 pub(crate) mod autoppm;
 pub(crate) mod calls;
 pub(crate) mod control;
+pub(crate) mod conventional;
 pub(crate) mod coordinator;
 pub(crate) mod device;
 pub(crate) mod devicecfg;
@@ -220,6 +221,41 @@ pub(crate) enum CallMsg {
         at_ms: u64,
         /// Why it ended.
         reason: EndReason,
+    },
+    /// A conventional (NBFM) channel's call started: the squelch opened and
+    /// the call was confirmed (tone and minimum length).
+    ConvStarted {
+        /// The channel, shared with the DSP thread that runs it; carries
+        /// every label the call is filed under.
+        spec: Arc<conventional::ChannelSpec>,
+        /// Call id ([`conventional::call_id`]).
+        id: u64,
+        /// What the engine measured at the open (its `at_ms` is stream time).
+        start: trunkd_analog::CallStart,
+        /// The recording device's wideband level gauge (see `Started`).
+        rssi: Option<trunkd_core::Metric>,
+        /// Call start, wall clock.
+        at_ms: u64,
+    },
+    /// Audio for an open conventional call: 8 kHz i16, whole 20 ms frames.
+    ConvPcm {
+        /// The channel's index ([`conventional::ChannelSpec::index`]).
+        channel: usize,
+        /// Call id.
+        id: u64,
+        /// At most 100 ms of PCM.
+        pcm: Vec<i16>,
+    },
+    /// A conventional call ended, with the engine's measurements.
+    ConvEnded {
+        /// The channel's index.
+        channel: usize,
+        /// Call id.
+        id: u64,
+        /// Why it ended and what was measured (its `at_ms` is stream time).
+        end: trunkd_analog::CallEnd,
+        /// Call end, wall clock.
+        at_ms: u64,
     },
 }
 

@@ -6,9 +6,9 @@
 //! at 20 Msps it is ~4 GFLOP/s (mix, FIR and one 1600-point FFT per 800
 //! samples), and that cost is the same whether one channel is read out of it
 //! or fifty. When every `[[site]]` on a tuner built its own, four sites paid
-//! for four identical filterbanks over the same samples — the 2026-09-16 ring
-//! overflow (review 2026-09-22, §3.1 O1). A bank is the one filterbank a
-//! device runs, and every site engine on the device is a consumer of it.
+//! for four identical filterbanks over the same samples, and the ring
+//! overflowed. A bank is the one filterbank a device runs, and every site
+//! engine on the device is a consumer of it.
 //!
 //! # Ownership
 //!

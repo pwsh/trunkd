@@ -308,7 +308,7 @@ pub(crate) fn run(
     loop {
         // Blocks until a grant arrives (no added latency) and wakes only to
         // look at `stop`: it used to poll every 2 ms, ~480 wakeups a second
-        // on an idle recorder (review 2026-09-22 §3.4, T-C3).
+        // on an idle recorder.
         match rx.recv_wait(STOP_POLL) {
             Ok(g) => {
                 // Peers hear about it before it is routed: publishing is a
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(followed_freq(&a_rx), Some(858_987_500));
     }
 
-    /// Review 2026-09-22 §3.4 (T-C3): an idle coordinator sleeps. It used to
+    /// An idle coordinator sleeps. It used to
     /// poll every 2 ms — 482 wakeups a second measured on the idle laptop
     /// recorder — and now blocks on the bus, waking only to look at `stop`.
     /// A grant still reaches its tuner at once, and a stop ends the thread.

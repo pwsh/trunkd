@@ -107,6 +107,38 @@ event ([§3](#3-radio-events)) and the `private_call` event-log record
 ([operations.md](operations.md#the-raw-event-log)), which are emitted whether or not the call
 carried audio worth uploading.
 
+### Conventional (analog) channel calls
+
+A call recorded on a `[[channel]]` (analog NBFM, see
+[configuration.md](configuration.md#channel--one-conventional-analog-channel)) goes up as an
+ordinary **group call**, so a server files, searches and names it exactly like a trunked one. No
+server change is needed: the fields that differ are these.
+
+| field | value |
+| --- | --- |
+| `systemLabel` | the channel's `system` (default `[uplink] system_label`) |
+| `site` | the channel's `site` (default `[uplink] site_label`, then the device id) |
+| `talkgroup` | the channel's `talkgroup` (default the frequency in kHz, `154250` for 154.250 MHz) |
+| `talkgroupLabel` | the channel's `name` |
+| `frequency`, `frequencies` | the channel frequency, one segment |
+| `sources` | `[]`, and no `source` field: analog carries no radio ids |
+| `audioName` | `<system>_<talkgroup>_<start-unix-ms>.mp3`, the same stem as any group call |
+| `mode` | `nbfm` |
+| `decoder` | `NBFM` (what sdrtrunk's ID3 tag carried for the same calls) |
+| `tone` | the configured tone, canonical spelling (`167.9`, `D445N`); absent for carrier squelch |
+| `toneDetected` | the tone heard for most of the call, if any — on a carrier-squelch channel too, which listens for every CTCSS and DCS tone. A DCS code is reported as its normal-polarity spelling (`D445I` is heard as `D043N`, the same signal on air). |
+| `squelchReason` | why the call ended: `squelch_closed`, `tone_lost`, `max_duration`, `shutdown`, or `orphaned` |
+| `snrDb` | channel power above its noise floor when the squelch opened, dB |
+| `peakDeviationHz` | largest deviation during the call, Hz |
+| `offsetHz` | mean carrier offset from the channel centre, Hz — a channel-only tuner has no automatic PPM correction, so this is where drift shows |
+
+The three measurements carry one decimal and are absent when not measured. `durationMs`,
+`speechS`, `recorder=trunkd` and `sourceQuality` are sent as on any call (`voice_frames` is `0`:
+there is no vocoder). Keyup keeps the new fields in `raw_meta`; a server that does not know them
+ignores them. The spool sidecar carries the same extras under the same names, with
+`"audio_type": "analog"` (trunk-recorder's word; P25 calls stay `digital`), so a call retried out of
+the spool is retried with them. `[recorder] skip_talkgroups` never applies to these calls.
+
 ### `sourceQuality` — which recorder heard this, and how well
 
 Several trunkd instances can hear one P25 site, so Keyup can be offered the same call twice.
@@ -410,6 +442,32 @@ Further per-tuner fields:
   *matches* the file is not listed; `site_id` always is, because the file has nowhere to write
   one. Sent always, empty array included, so a reader can tell "this tuner runs exactly what the
   file says" from "this recorder is too old to tell you".
+
+### Conventional channels
+
+A tuner that records conventional NBFM [`[[channel]]`s](configuration.md#channel--one-conventional-analog-channel)
+adds a `channels` array to its entry, one object per channel in config order (at most 64; `name`
+and `system` capped at 64 characters):
+
+```json
+"channels": [
+  { "index": 0, "name": "Public Works", "system": "Example County",
+    "frequency_hz": 154000000, "tone": "167.9", "talkgroup": 154000,
+    "state": "open", "open": true, "snr_db": 21.5, "power_dbfs": -42.0,
+    "noise_floor_dbfs": -63.5, "offset_hz": -120.0, "calls": 4, "calls_too_short": 1,
+    "tone_mismatch": 0, "false_opens": 2, "last_call_end_ms": 1788499700000 }
+]
+```
+
+`tone` is the canonical CTCSS frequency or DCS code, `null` for carrier squelch. `state` is
+`closed` | `opening` | `open` | `hang`, or `idle` while the tuner is not streaming or is disabled;
+the live measurements (`snr_db`, `power_dbfs`, `noise_floor_dbfs`) obey the tuner's liveness gate
+and are omitted while `idle`. `offset_hz` (the last call's carrier offset) and `last_call_end_ms`
+(unix ms) are omitted before the first call. The counters run from the tuner's last start. Field
+meanings are spelled out in [panel.md](panel.md#conventional-channels).
+
+The field is **additive and omitted entirely** on a tuner with no channels, so a P25-only recorder
+posts exactly the body it did before channels existed; Keyup ignores fields it does not know.
 
 ### Station self-description
 

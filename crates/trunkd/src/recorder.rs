@@ -29,7 +29,7 @@ use trunkd_core::{Error, Metrics, Result};
 use trunkd_supervisor::{AfterBudget, RestartPolicy, SupervisedHandle, Supervisor, UnitHooks};
 use trunkd_uplink::{KeyupUplink, Spool, UplinkConfig, UplinkHold, UplinkStats};
 
-use crate::config::{AudioFormatName, Backend, Config, DeviceRole};
+use crate::config::{AudioFormatName, Backend, ChannelMode, Config, DeviceRole};
 use crate::pipeline::calls::CallDelivery;
 use crate::pipeline::control::{
     self, ControlConfig, DesiredState, RecorderControl, TunerControl, TunerDescriptor,
@@ -155,7 +155,12 @@ pub fn run_once_with_reload(
     reload: Arc<AtomicBool>,
 ) -> Result<RunSummary> {
     cfg.validate()?;
-    for c in cfg.channel.iter().filter(|c| c.enabled) {
+    // AM is parsed (the sdrtrunk importer produces it) but not demodulated.
+    for c in cfg
+        .channel
+        .iter()
+        .filter(|c| c.enabled && c.mode == ChannelMode::Am)
+    {
         tracing::warn!(
             channel = %c.name,
             frequency = c.frequency,
@@ -166,8 +171,13 @@ pub fn run_once_with_reload(
 
     let metrics = Metrics::new();
     let sites = Arc::new(site_specs(cfg));
-    if sites.is_empty() {
-        return Err(Error::config("no enabled P25 site to record"));
+    // Enabled NBFM channels, which the device units build their engines from.
+    // Empty — and unallocated — for a config with none.
+    let channels = crate::pipeline::conventional::channel_specs(cfg);
+    if sites.is_empty() && channels.is_empty() {
+        return Err(Error::config(
+            "no enabled P25 site or conventional channel to record",
+        ));
     }
     // Talkgroups this box never records. The TOML half is fixed for the run;
     // keyup's half arrives on the desired state and is applied through
@@ -244,7 +254,7 @@ pub fn run_once_with_reload(
     // sheds, and the operator sees that as `event_log_dropped` on the status
     // line.
     let (obs_tx, obs_rx) = chan::bounded::<ObsMsg>(cfg.recorder.event_queue_depth);
-    let (calls_tx, calls_rx) = chan::bounded::<CallMsg>(CALL_QUEUE_DEPTH);
+    let (calls_tx, calls_rx) = chan::bounded::<CallMsg>(call_queue_depth(channels.len()));
     let (obs_tx, calls_tx) = (Arc::new(obs_tx), Arc::new(calls_tx));
 
     // Opt-in spectrum frames (W4): DSP threads → the control thread, which POSTs
@@ -404,7 +414,7 @@ pub fn run_once_with_reload(
     // tuner about a second after its first lock — a recording gap at every
     // start. Bounded by `desired_prefetch_timeout_s`; a failure falls back to
     // the TOML and the poll loop behaves exactly as it always has.
-    let descriptors = tuner_descriptors(cfg, sites.as_ref());
+    let descriptors = tuner_descriptors(cfg, sites.as_ref(), &channels);
     control::prefetch_desired(
         &control::PrefetchConfig {
             desired_url: control_cfg.desired_url.clone(),
@@ -433,7 +443,9 @@ pub fn run_once_with_reload(
         link.clone(),
     );
     if handles.is_empty() {
-        return Err(Error::config("no device serves an enabled site"));
+        return Err(Error::config(
+            "no device serves an enabled site or conventional channel",
+        ));
     }
 
     // The link's own socket and threads: receive, ingest and hello. Started
@@ -579,6 +591,12 @@ pub fn run_once_with_reload(
         None
     };
 
+    if !channels.is_empty() {
+        tracing::info!(
+            channels = channels.len(),
+            "conventional NBFM channels configured"
+        );
+    }
     tracing::info!(
         devices = handles.len(),
         sites = sites.len(),
@@ -702,21 +720,35 @@ pub fn run_once_with_reload(
 /// itself sit through before ending a call (`hang_ms + call_inactivity_ms`),
 /// whichever is longer: the sweep is a backstop for a lost message, and must
 /// never race the engine's own end of a call that is merely quiet.
+///
+/// A conventional channel's engine can sit silent for its `hang_ms` (waiting
+/// for a re-key) plus its `tone_timeout_ms` (holding a re-key's audio until
+/// the tone confirms) before its next message, so those count too. With no
+/// channel configured that term is empty and the bound is what it always was.
 fn orphan_after(cfg: &Config) -> Duration {
     let engine = trunkd_p25::site::SiteConfig::default();
-    let longest_ms = cfg
-        .site
+    let sites = cfg.site.iter().filter(|s| s.enabled).map(|s| {
+        s.hang_ms
+            .unwrap_or(engine.hang_ms)
+            .saturating_add(s.call_inactivity_ms.unwrap_or(engine.call_inactivity_ms))
+    });
+    let channels = cfg
+        .channel
         .iter()
-        .filter(|s| s.enabled)
-        .map(|s| {
-            s.hang_ms
-                .unwrap_or(engine.hang_ms)
-                .saturating_add(s.call_inactivity_ms.unwrap_or(engine.call_inactivity_ms))
-        })
-        .max()
-        .unwrap_or(0);
+        .filter(|c| c.enabled && c.mode == ChannelMode::Nbfm)
+        .filter_map(|c| c.params().ok())
+        .map(|p| u64::from(p.squelch.hang_ms) + u64::from(p.squelch.tone_timeout_ms));
+    let longest_ms = sites.chain(channels).max().unwrap_or(0);
     crate::pipeline::calls::MIN_ORPHAN_AFTER
         .max(Duration::from_millis(longest_ms.saturating_mul(10)))
+}
+
+/// Depth of the DSP → call-thread queue: [`CALL_QUEUE_DEPTH`], plus
+/// [`QUEUE_DEPTH_PER_CHANNEL`](crate::pipeline::conventional::QUEUE_DEPTH_PER_CHANNEL)
+/// per enabled NBFM channel — unchanged when there are none.
+fn call_queue_depth(channels: usize) -> usize {
+    CALL_QUEUE_DEPTH
+        + channels.saturating_mul(crate::pipeline::conventional::QUEUE_DEPTH_PER_CHANNEL)
 }
 
 /// One [`SiteSpec`] per enabled site, in config order.
@@ -754,8 +786,14 @@ fn first_non_empty(a: &str, b: &str) -> String {
 
 /// One [`TunerDescriptor`] per configured device, for the control-loop status
 /// report. Each device is mapped to the first enabled site it serves, so the
-/// report can read that site's per-tuner gauges (`site.N.*`).
-fn tuner_descriptors(cfg: &Config, sites: &[SiteSpec]) -> Vec<TunerDescriptor> {
+/// report can read that site's per-tuner gauges (`site.N.*`). A device that
+/// serves no site but carries conventional channels reports the site label of
+/// its first channel, with no site gauges to read.
+fn tuner_descriptors(
+    cfg: &Config,
+    sites: &[SiteSpec],
+    channels: &[crate::pipeline::conventional::ChannelSpec],
+) -> Vec<TunerDescriptor> {
     // Enabled sites in the same order `site_specs`/`sites` used, so the metric
     // prefix `site.{i}` lines up with the gauges the DSP thread publishes.
     let enabled_sites: Vec<&crate::config::Site> = cfg.site.iter().filter(|s| s.enabled).collect();
@@ -770,7 +808,13 @@ fn tuner_descriptors(cfg: &Config, sites: &[SiteSpec]) -> Vec<TunerDescriptor> {
                     sites.get(i).map(|s| s.site_label.clone()),
                     sites.get(i).map(|s| s.metric_prefix.clone()),
                 ),
-                None => (None, None),
+                None => (
+                    channels
+                        .iter()
+                        .find(|c| c.device_id == d.id)
+                        .map(|c| c.site_label.clone()),
+                    None,
+                ),
             };
             TunerDescriptor {
                 id: d.id.clone(),
@@ -792,6 +836,11 @@ fn tuner_descriptors(cfg: &Config, sites: &[SiteSpec]) -> Vec<TunerDescriptor> {
                     height_m: d.height_m,
                     notes: d.notes.clone(),
                 },
+                channels: channels
+                    .iter()
+                    .filter(|c| c.device_id == d.id)
+                    .map(crate::pipeline::control::ChannelDescriptor::from)
+                    .collect(),
             }
         })
         .collect()
@@ -845,6 +894,9 @@ fn spawn_devices(
     };
 
     let wiring = build_cross_wiring(cfg, shared, &enabled_index, link.clone());
+    // Before any device thread exists: the first to open must already know
+    // which peers to wait for (the replay lockstep).
+    expect_replay_members(cfg, &active, &shared.replay_clock);
 
     for (dev_idx, d) in cfg.device.iter().enumerate() {
         if !active.contains(&d.id.as_str()) {
@@ -936,6 +988,24 @@ fn spawn_devices(
     }
 
     (supervisor, handles, wiring.coordinator)
+}
+
+/// Reserve a place on the replay clock for every device this run starts that
+/// will replay a file unthrottled, so that whichever opens first waits (one
+/// lockstep window, bounded by the clock's join deadline) for the others
+/// instead of racing through its file while they build their engines. A
+/// device that then idles or fails to open withdraws its place. Live
+/// backends and real-time playback are never reserved, and a single reserved
+/// device has no one to wait for, so neither changes.
+fn expect_replay_members(cfg: &Config, active: &[&str], clock: &trunkd_sdr::Lockstep) {
+    for d in &cfg.device {
+        if d.backend == Backend::Iqfile
+            && d.pacing == crate::config::PacingName::Unthrottled
+            && active.contains(&d.id.as_str())
+        {
+            clock.expect(d.id.clone());
+        }
+    }
 }
 
 /// How a device unit is restarted: quickly at first (a USB hiccup or a busy
@@ -1697,6 +1767,37 @@ mod tests {
         assert_eq!(drained, cfg.recorder.event_queue_depth);
     }
 
+    /// Every unthrottled iqfile device the run will start is reserved on the
+    /// replay clock up front; real-time playback, live backends and devices
+    /// nothing enabled uses are not.
+    #[test]
+    fn unthrottled_replays_are_reserved_on_the_replay_clock() {
+        let mut cfg = cfg_with(Uplink::default());
+        let base = cfg.device[0].clone();
+        let device = |id: &str, backend: Backend, pacing: crate::config::PacingName| {
+            let mut d = base.clone();
+            d.id = id.into();
+            d.backend = backend;
+            d.pacing = pacing;
+            d
+        };
+        use crate::config::PacingName::{Realtime, Unthrottled};
+        cfg.device = vec![
+            device("fast0", Backend::Iqfile, Unthrottled),
+            device("fast1", Backend::Iqfile, Unthrottled),
+            device("paced", Backend::Iqfile, Realtime),
+            device("live", Backend::Hackrf, Unthrottled),
+            device("unused", Backend::Iqfile, Unthrottled),
+        ];
+        let active = ["fast0", "fast1", "paced", "live"];
+        let clock = trunkd_sdr::Lockstep::new();
+        expect_replay_members(&cfg, &active, &clock);
+        assert_eq!(
+            clock.pending(),
+            vec!["fast0".to_owned(), "fast1".to_owned()]
+        );
+    }
+
     fn cfg_with(uplink: Uplink) -> Config {
         Config {
             uplink,
@@ -2329,5 +2430,230 @@ mod tests {
         coord.stop.store(true, Ordering::Relaxed);
         drop(w);
         let _ = coord.thread.join();
+    }
+
+    // -- conventional channels ------------------------------------------------
+
+    /// A temp directory removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let p =
+                std::env::temp_dir().join(format!("trunkd-{tag}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&p).expect("scratch dir");
+            Scratch(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const CONV_RATE: u32 = 1_000_000;
+    const CONV_CENTER: u64 = 154_500_000;
+    const CONV_CHANNEL: u64 = 154_250_000;
+
+    /// `secs` of a 1 Msps CF32 capture centred on [`CONV_CENTER`]: a low noise
+    /// floor everywhere, and an NBFM carrier on [`CONV_CHANNEL`] keyed over
+    /// `keyed` (seconds) with a 1 kHz tone at ±2 kHz and CTCSS 167.9 Hz at
+    /// ±600 Hz. Synthesised directly at the wideband rate (one phase
+    /// accumulator), which is cheap enough for a debug-build test.
+    fn conventional_capture(path: &std::path::Path, secs: f64, keyed: std::ops::Range<f64>) {
+        use std::io::Write;
+        let fs = f64::from(CONV_RATE);
+        let n = (secs * fs) as usize;
+        let offset = CONV_CHANNEL as f64 - CONV_CENTER as f64;
+        let tau = std::f64::consts::TAU;
+        let mut phase = 0.0f64;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 40) as f64 / f64::from(1u32 << 24) - 0.5) as f32 * 0.02
+        };
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("capture"));
+        for i in 0..n {
+            let t = i as f64 / fs;
+            let (mut re, mut im) = (noise(), noise());
+            if keyed.contains(&t) {
+                re += 0.1 * phase.cos() as f32;
+                im += 0.1 * phase.sin() as f32;
+            }
+            let dev = 2_000.0 * (tau * 1_000.0 * t).sin() + 600.0 * (tau * 167.9 * t).sin();
+            phase = (phase + tau * (offset + dev) / fs).rem_euclid(tau);
+            out.write_all(&re.to_le_bytes()).expect("write");
+            out.write_all(&im.to_le_bytes()).expect("write");
+        }
+        out.flush().expect("flush");
+    }
+
+    /// Every `.json` sidecar under the spool's `YYYY/MM/DD` tree.
+    fn sidecars(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "json") {
+                    let text = std::fs::read_to_string(&p).expect("sidecar");
+                    out.push(serde_json::from_str(&text).expect("sidecar json"));
+                }
+            }
+        }
+        out
+    }
+
+    fn conventional_config(capture: &std::path::Path, spool: &std::path::Path) -> Config {
+        let toml = format!(
+            r#"
+            [uplink]
+            spool_only = true
+            spool_path = "{spool}"
+            audio_format = "wav"
+            [recorder]
+            instance_id = "conv-test"
+            [[device]]
+            id = "vhf"
+            backend = "iqfile"
+            path = "{capture}"
+            sample_rate = {CONV_RATE}
+            center_frequency = {CONV_CENTER}
+            pacing = "unthrottled"
+            [[channel]]
+            name = "Fire Dispatch"
+            system = "Example County Fire"
+            site = "Example Hill"
+            frequency = {CONV_CHANNEL}
+            tone = "167.9"
+            talkgroup = 14
+            [[channel]]
+            name = "Airband"
+            frequency = 154300000
+            mode = "am"
+            "#,
+            spool = spool.display(),
+            capture = capture.display(),
+        );
+        toml::from_str(&toml).expect("conventional config")
+    }
+
+    /// A config with conventional channels and no `[[site]]` runs: the
+    /// channels-only device builds its own bank, streams, and records the
+    /// keyed carrier as one analog call filed per the keyup upload contract. The AM channel is
+    /// skipped.
+    #[test]
+    fn a_channels_only_recorder_streams_and_records() {
+        let scratch = Scratch::new("conv-run");
+        let capture = scratch.0.join("vhf.cf32");
+        let spool = scratch.0.join("spool");
+        conventional_capture(&capture, 5.0, 1.0..3.5);
+        let cfg = conventional_config(&capture, &spool);
+        cfg.validate().expect("a channels-only config validates");
+
+        let summary =
+            run_once(&cfg, Arc::new(AtomicBool::new(false))).expect("a channels-only run");
+        assert_eq!(summary.calls_started, 0, "no P25 traffic");
+
+        let calls = sidecars(&spool);
+        assert_eq!(calls.len(), 1, "one keyed carrier, one call: {calls:#?}");
+        let c = &calls[0];
+        assert_eq!(c["audio_type"], "analog");
+        assert_eq!(c["short_name"], "Example County Fire");
+        assert_eq!(c["site"], "Example Hill");
+        assert_eq!(c["talkgroup"], 14);
+        assert_eq!(c["talkgroup_group_tag"], "Fire Dispatch");
+        assert_eq!(c["freq"], CONV_CHANNEL);
+        assert_eq!(c["srcList"], serde_json::json!([]));
+        assert_eq!(c["mode"], "nbfm");
+        assert_eq!(c["decoder"], "NBFM");
+        assert_eq!(c["tone"], "167.9");
+        assert_eq!(c["toneDetected"], "167.9");
+        assert_eq!(c["squelchReason"], "squelch_closed");
+        assert!(c["snrDb"].as_f64().is_some_and(|v| v > 10.0), "{c}");
+        let len_ms = c["call_length_ms"].as_i64().expect("length");
+        assert!(
+            (2_250..=2_750).contains(&len_ms),
+            "a 2.5 s transmission recorded as {len_ms} ms"
+        );
+        let wav = spool_audio_len(&spool);
+        assert!(
+            wav > 2 * 8_000 * 2,
+            "the call carries its audio ({wav} bytes)"
+        );
+    }
+
+    /// Total bytes of `.wav` files under the spool.
+    fn spool_audio_len(dir: &std::path::Path) -> u64 {
+        let mut total = 0;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "wav") {
+                    total += e.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+        total
+    }
+
+    /// Without channels nothing about the run's sizing changes.
+    #[test]
+    fn the_call_queue_grows_only_with_channels() {
+        assert_eq!(call_queue_depth(0), CALL_QUEUE_DEPTH);
+        assert_eq!(call_queue_depth(11), CALL_QUEUE_DEPTH + 88);
+        let p25 = cfg_with(Uplink::default());
+        assert!(crate::pipeline::conventional::channel_specs(&p25).is_empty());
+    }
+
+    /// A channel's hang lengthens the orphan bound only when it would exceed
+    /// the sites' own; a P25-only config keeps the bound it always had.
+    #[test]
+    fn the_orphan_bound_counts_channel_hang_only_when_channels_exist() {
+        let p25 = cfg_with(Uplink::default());
+        let before = orphan_after(&p25);
+        let mut with_channel = p25.clone();
+        with_channel.channel = conventional_config(
+            std::path::Path::new("/dev/null"),
+            std::path::Path::new("/tmp/unused"),
+        )
+        .channel;
+        with_channel.channel[0].squelch = Some(crate::config::Squelch {
+            hang_ms: Some(30_000),
+            ..Default::default()
+        });
+        assert_eq!(orphan_after(&p25), before);
+        assert_eq!(
+            orphan_after(&with_channel),
+            Duration::from_millis((30_000 + 750) * 10)
+        );
+    }
+
+    /// A device carrying only channels is described to keyup with its first
+    /// channel's site label (and no site gauges); P25 devices are unchanged.
+    #[test]
+    fn a_channels_only_tuner_reports_its_channel_site() {
+        let cfg = conventional_config(
+            std::path::Path::new("/dev/null"),
+            std::path::Path::new("/tmp/unused"),
+        );
+        let channels = crate::pipeline::conventional::channel_specs(&cfg);
+        let d = tuner_descriptors(&cfg, &[], &channels);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].site_label.as_deref(), Some("Example Hill"));
+        assert_eq!(d[0].site_metric_prefix, None);
+        assert_eq!(tuner_descriptors(&cfg, &[], &[])[0].site_label, None);
     }
 }

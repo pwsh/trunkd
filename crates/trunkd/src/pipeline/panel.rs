@@ -251,6 +251,11 @@ impl PanelState {
         // reading the log. The private-call list above is unchanged: it is a
         // different question (which radios called which) and keeps its shape.
         obj.insert("calls".to_owned(), self.calls_json());
+        // The conventional channels table: every `[[channel]]` this recorder
+        // runs, flattened off the tuner entries (where the keyup POST carries
+        // them) with the tuner's key added as `device`. Always present, empty
+        // on a P25-only recorder, which the page reads as "no table at all".
+        obj.insert("channels".to_owned(), channels_json(&tuners));
 
         // Whether a staged config has yet to be confirmed by the running unit —
         // the same "pending" keyup shows, computed here so the panel does not
@@ -409,6 +414,25 @@ fn call_row_json(r: &crate::pipeline::CallRow) -> Value {
         "reason": r.reason,
         "outcome": r.outcome,
     })
+}
+
+/// Every tuner's conventional channels as one list, in channel order, each
+/// entry the tuner POST's channel object plus the `device` serving it.
+fn channels_json(tuners: &[crate::pipeline::control::TunerStatus]) -> Value {
+    let mut rows: Vec<(usize, Value)> = tuners
+        .iter()
+        .flat_map(|t| {
+            t.channels.iter().map(|c| {
+                let mut v = c.to_json();
+                if let Some(map) = v.as_object_mut() {
+                    map.insert("device".to_owned(), json!(t.tuner_key));
+                }
+                (c.index, v)
+            })
+        })
+        .collect();
+    rows.sort_by_key(|(i, _)| *i);
+    Value::Array(rows.into_iter().map(|(_, v)| v).collect())
 }
 
 fn config_path_json(state: &PanelState) -> Value {
@@ -2012,26 +2036,35 @@ control_frequencies = [851050000]
 
     impl Panel {
         fn start(tokens: Vec<String>) -> Panel {
-            Panel::build(tokens, false, None)
+            Panel::build(tokens, false, None, Vec::new())
+        }
+
+        /// A panel whose one tuner also records conventional channels.
+        fn with_channels(channels: Vec<crate::pipeline::control::ChannelDescriptor>) -> Panel {
+            Panel::build(Vec::new(), false, None, channels)
         }
 
         /// A panel with the live audio monitor switched on, and the hub kept so
         /// the test can publish into it.
         fn with_monitor() -> (Panel, Arc<crate::pipeline::monitor::MonitorHub>) {
             let hub = crate::pipeline::monitor::MonitorHub::new();
-            (Panel::build(Vec::new(), false, Some(Arc::clone(&hub))), hub)
+            (
+                Panel::build(Vec::new(), false, Some(Arc::clone(&hub)), Vec::new()),
+                hub,
+            )
         }
 
         /// A panel whose config came from a real file, so the write routes have
         /// something to write.
         fn with_config(tokens: Vec<String>) -> Panel {
-            Panel::build(tokens, true, None)
+            Panel::build(tokens, true, None, Vec::new())
         }
 
         fn build(
             tokens: Vec<String>,
             with_file: bool,
             monitor: Option<Arc<crate::pipeline::monitor::MonitorHub>>,
+            channels: Vec<crate::pipeline::control::ChannelDescriptor>,
         ) -> Panel {
             let metrics = trunkd_core::Metrics::new();
             // Enough of a site for the sites[] block to have real numbers.
@@ -2112,6 +2145,7 @@ control_frequencies = [851050000]
                     site_label: Some("Central".into()),
                     site_metric_prefix: Some("site.0".into()),
                     description: Default::default(),
+                    channels,
                 }],
                 desired: desired.clone(),
                 units: Vec::new(),
@@ -2719,7 +2753,7 @@ control_frequencies = [851050000]
         assert_eq!(body["sites"][0]["control_frequency_hz"], 851_050_000_u64);
         assert_eq!(body["sites"][0]["nac"], 0x2f1);
         assert_eq!(body["counters"]["calls_started"], 7);
-        // Phase 2 calls refused, per site and recorder-wide (T-D1).
+        // Phase 2 calls refused, per site and recorder-wide.
         assert_eq!(body["sites"][0]["calls_tdma_refused"], 3);
         assert_eq!(body["counters"]["calls_tdma_refused"], 3);
         // The skip list is reported on the recorder block whether or not
@@ -2731,6 +2765,91 @@ control_frequencies = [851050000]
         // Private calls are their own list: nothing has happened here, so it is
         // present and empty rather than absent.
         assert_eq!(body["private_calls"], json!([]));
+    }
+
+    /// A P25-only recorder: `channels` is present and empty, which the page
+    /// reads as "no table" — the section ships hidden and the renderer keeps it
+    /// hidden for an empty list, so the panel looks exactly as it did before
+    /// channels existed.
+    #[test]
+    fn a_recorder_without_channels_reports_none_and_the_page_hides_the_table() {
+        let panel = Panel::start(Vec::new());
+        let (status, body) = panel.get("/api/status", None);
+        assert_eq!(status, 200);
+        assert_eq!(body["channels"], json!([]));
+        assert!(
+            body["tuners"][0].get("channels").is_none(),
+            "a P25-only tuner entry carries no channels field: {body}"
+        );
+        assert!(INDEX_HTML.contains(r#"<section id="convsec" hidden>"#));
+        assert!(INDEX_HTML.contains(r#"$("convsec").hidden = rows.length === 0;"#));
+        assert!(INDEX_HTML.contains("renderChannels(s.channels || []);"));
+    }
+
+    fn example_channel(
+        index: usize,
+        name: &str,
+        tone: Option<&str>,
+    ) -> crate::pipeline::control::ChannelDescriptor {
+        crate::pipeline::control::ChannelDescriptor {
+            index,
+            name: name.into(),
+            system: "Example County".into(),
+            frequency_hz: 154_000_000 + index as u64 * 25_000,
+            tone: tone.map(str::to_owned),
+            talkgroup: 154_000 + index as u32 * 25,
+            metric_prefix: format!("channel.{index}"),
+        }
+    }
+
+    /// The channels table comes off the `channel.{i}.*` gauges, flattened off
+    /// the tuner entries with the tuner's key as `device`, in channel order.
+    #[test]
+    fn status_lists_the_conventional_channels_from_their_gauges() {
+        let panel = Panel::with_channels(vec![
+            example_channel(1, "Fire Dispatch", Some("D445N")),
+            example_channel(0, "Public Works", Some("167.9")),
+        ]);
+        let m = &panel.shared.metrics;
+        let now = trunkd_core::Timestamp::now().unix_millis();
+        m.gauge("device.hackrf-0.stream_beat_ms").set(now as u64);
+        m.gauge("channel.0.state").set(2);
+        m.gauge("channel.0.open").set(1);
+        m.gauge("channel.0.snr_db").set_f64(21.5);
+        m.gauge("channel.0.calls").set(4);
+        m.gauge("channel.0.tone_mismatch").set(1);
+        m.gauge("channel.0.false_opens").set(2);
+        m.gauge("channel.0.last_call_end_ms").set(1_788_499_700_000);
+        m.gauge("channel.1.snr_db").set_f64(0.5);
+
+        let (status, body) = panel.get("/api/status", None);
+        assert_eq!(status, 200);
+        let rows = body["channels"].as_array().expect("a channels array");
+        assert_eq!(rows.len(), 2);
+        let pw = &rows[0];
+        assert_eq!(pw["index"], 0);
+        assert_eq!(pw["name"], "Public Works");
+        assert_eq!(pw["system"], "Example County");
+        assert_eq!(pw["device"], "hackrf-0");
+        assert_eq!(pw["frequency_hz"], 154_000_000_u64);
+        assert_eq!(pw["tone"], "167.9");
+        assert_eq!(pw["state"], "open");
+        assert_eq!(pw["open"], true);
+        assert_eq!(pw["snr_db"], 21.5);
+        assert_eq!(pw["calls"], 4);
+        assert_eq!(pw["tone_mismatch"], 1);
+        assert_eq!(pw["false_opens"], 2);
+        assert_eq!(pw["last_call_end_ms"], 1_788_499_700_000_i64);
+        let fd = &rows[1];
+        assert_eq!(fd["name"], "Fire Dispatch");
+        assert_eq!(fd["tone"], "D445N");
+        assert_eq!(fd["state"], "closed");
+        assert!(fd.get("last_call_end_ms").is_none(), "{fd}");
+        // The same objects ride on the tuner entry, as keyup gets them.
+        assert_eq!(
+            body["tuners"][0]["channels"].as_array().map(Vec::len),
+            Some(2)
+        );
     }
 
     /// Seed site 0's slot with a real observation document, the way the

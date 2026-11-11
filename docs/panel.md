@@ -45,8 +45,8 @@ recording.
 
 | route | method | what it returns |
 | --- | --- | --- |
-| `/` | GET | The whole panel: one self-contained HTML page, no external assets (the box may have no route out). Header (instance, version, uptime, station), a card per tuner, the site table, the counters strip, an **Activity** section (what is on air now, with elapsed time ticking, and the last 60 finished calls with their outcome — each row with a *listen* button when the live monitor is on), supervised-unit health, and a config dump on demand. Refreshes every 2 s. |
-| `/api/status` | GET | Everything the panel draws, as JSON: `instance_id`, `recorder_version`, `uptime_s`, `station`, `counters`, `tuners[]`, `supervisor[]`, `sites[]`, plus `recorder` — the recorder-wide settings in force (`spool_only`, `event_log_archive`, `link`, `broadcastify`) each with the source that last set it (`config`, `keyup` or, for the hold, `panel`). The `tuners[]` objects are built by the *same* code as the Keyup tuner-status POST (plus a `pending` flag), so the panel can never show a different truth than Keyup does. The `link` settings are **display only** here: Keyup is the editor for them. A top-level `broadcastify` object carries direct-to-Broadcastify delivery: `{enabled, allowed, revision, api_key_set, api_key_prefix, uploaded, duplicate, failed, late, claim_denied, skipped, last_response, last_at}` — counters since boot, and never the key itself. A top-level `calls` object carries the Activity view: `{"active": [...], "recent": [...]}`, each row `{id, site, kind, talkgroup, alias, source, target, frequency_hz, encrypted, started_at_ms, ended_at_ms, active, voice_frames, reason, outcome}`. `outcome` is this recorder's own disposition of the finished call (`delivered`, `no voice`, `dropped`, `no audio`). |
+| `/` | GET | The whole panel: one self-contained HTML page, no external assets (the box may have no route out). Header (instance, version, uptime, station), a card per tuner, the site table, the **Conventional channels** table (only when `[[channel]]`s are configured), the counters strip, an **Activity** section (what is on air now, with elapsed time ticking, and the last 60 finished calls with their outcome — each row with a *listen* button when the live monitor is on), supervised-unit health, and a config dump on demand. Refreshes every 2 s. |
+| `/api/status` | GET | Everything the panel draws, as JSON: `instance_id`, `recorder_version`, `uptime_s`, `station`, `counters`, `tuners[]`, `supervisor[]`, `sites[]`, plus `recorder` — the recorder-wide settings in force (`spool_only`, `event_log_archive`, `link`, `broadcastify`) each with the source that last set it (`config`, `keyup` or, for the hold, `panel`). The `tuners[]` objects are built by the *same* code as the Keyup tuner-status POST (plus a `pending` flag), so the panel can never show a different truth than Keyup does. The `link` settings are **display only** here: Keyup is the editor for them. A top-level `broadcastify` object carries direct-to-Broadcastify delivery: `{enabled, allowed, revision, api_key_set, api_key_prefix, uploaded, duplicate, failed, late, claim_denied, skipped, last_response, last_at}` — counters since boot, and never the key itself. A top-level `calls` object carries the Activity view: `{"active": [...], "recent": [...]}`, each row `{id, site, kind, talkgroup, alias, source, target, frequency_hz, encrypted, started_at_ms, ended_at_ms, active, voice_frames, reason, outcome}`. `outcome` is this recorder's own disposition of the finished call (`delivered`, `no voice`, `dropped`, `no audio`). A top-level `channels` array carries the conventional channels (see [below](#conventional-channels)); it is always present and empty on a recorder with none. |
 | `/api/sites/{index}/detail` | GET | One site's full profile, as the panel's expandable Sites row draws it. The body is the **observation document** that site's observations POST carries (`system`, `site`, `services`, `control`, `secondary_control`, `configured_control`, `bands[]`, `traffic[]`, `adjacent_sites[]`, `message_mix`, `unknown_exemplars`, `link_control_mix`, `data_channel`, `lsd_nonzero`) — one renderer, so the panel and the archive cannot disagree — plus `site_label`, `system_label`, `locked` and `control_locked_hz`, `recorder_sites[]` (every site this recorder decodes, so a neighbour that is one of them can be marked), `message_kinds` (`{known, unknown, noise, top_unknown[]}`) and `unknowns[]` (prose lines: neighbours this recorder does not decode, secondary control channels with no resolvable frequency, services never heard, recurring unnamed message kinds, bands referenced but never heard). 404 for an index that is not a configured site; 503 in the first seconds of a run. |
 | `/api/config` | GET | The loaded config as JSON with every secret replaced by `"***"`: `uplink.api_key`, each `server.tokens` entry, `[link] key`, and any `[device.settings]` entry whose name contains `key`, `token`, `secret` or `password`. An unset secret stays `""`. Direct-to-Broadcastify credentials pushed by Keyup never appear in any panel route. |
 | `/about` | GET | The About / diagnostics page (below). Served without a token for the same reason `/` is — it carries no data, it fetches `/api/about`. |
@@ -130,6 +130,42 @@ closed after the answer; at most 16 are read or answered at once (a 17th gets a 
 must arrive within 10 s and an answer be written within 15 s, and each connection has its own
 thread, so a client that stops reading costs its own connection and nobody else's.
 `/api/monitor/stream` needs HTTP/1.1 and ends when one chunk cannot be written within 10 s.
+
+## Conventional channels
+
+A recorder with enabled NBFM [`[[channel]]`s](configuration.md#channel--one-conventional-analog-channel)
+gets one more table, under Sites: one row per channel with its name and system, frequency, tone
+(`carrier` for carrier squelch), the tuner recording it, the squelch state, SNR, calls kept (plus
+how many openings were too short to keep), when the last call ended, tone mismatches and false
+opens. With no channels configured the section stays hidden and the page is exactly what it was.
+The figures come from the `channel.{i}.*` gauges the tuner's DSP thread publishes once a second.
+
+`/api/status` carries the same rows as a top-level `channels` array, in config order:
+
+```json
+"channels": [
+  { "index": 0, "name": "Public Works", "system": "Example County", "device": "sdr0",
+    "frequency_hz": 154000000, "tone": "167.9", "talkgroup": 154000,
+    "state": "open", "open": true, "snr_db": 21.5, "power_dbfs": -42.0,
+    "noise_floor_dbfs": -63.5, "offset_hz": -120.0, "calls": 4, "calls_too_short": 1,
+    "tone_mismatch": 0, "false_opens": 2, "last_call_end_ms": 1788499700000 }
+]
+```
+
+* `state` — `closed`, `opening` (carrier up, audio held while the tone or the minimum length is
+  confirmed), `open`, `hang` (carrier dropped, waiting out the hang time), or `idle` when the
+  tuner is not streaming or is disabled. `open` is true for `open` and `hang`.
+* `snr_db`, `power_dbfs`, `noise_floor_dbfs` — live measurements, omitted while the channel is
+  `idle`. `offset_hz` is the carrier offset measured on the last call (omitted before the first);
+  a steady value beyond ±500 Hz says the tuner's `ppm` wants setting.
+* `calls`, `calls_too_short`, `tone_mismatch`, `false_opens` — since the tuner last started.
+  `tone_mismatch` counts carrier openings dropped because the configured tone never came (another
+  user of the frequency); `false_opens` counts openings vetoed as noise. A climbing
+  `false_opens` usually means `open_db` is too low for the site.
+* `last_call_end_ms` — unix ms, omitted before the first call.
+
+Each tuner entry in `tuners[]` carries its own channels under the same field (without `device`),
+which is how they reach Keyup ([keyup.md](keyup.md#5-tuner-status)).
 
 ## Restarting a tuner
 

@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn a_captured_frame_resent_from_another_port_is_refused_and_not_acked() {
-        // C4: the replay state used to be keyed by source address, so the same
+        // The replay state used to be keyed by source address, so the same
         // datagram from a second port met fresh state and was routed again.
         let metrics = Metrics::new();
         let b = LinkNode::bind("127.0.0.1:0", &[], KEY, metrics.clone()).expect("binds");
@@ -1254,7 +1254,7 @@ mod tests {
 
     #[test]
     fn a_retransmission_overtaken_by_a_later_frame_is_still_delivered() {
-        // C5: grant seq 9's first copy is lost, and the sender's next frame
+        // Grant seq 9's first copy is lost, and the sender's next frame
         // (seq 10) arrives before 9's retransmission. The old high-water mark
         // dropped 9 as a replay *after* acking it — counted delivered by the
         // sender, never seen by the pipeline.

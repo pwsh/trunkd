@@ -448,7 +448,7 @@ fn call_keys(uploads: &[&Req]) -> Vec<(u64, u16)> {
 /// Every radio in this capture keys exactly one talkgroup, so a radio listed
 /// under two talkgroups is a caller carried over from the previous call on a
 /// re-used frequency — which is what a new call heard first as a grant update
-/// used to inherit (review 2026-09-22, D3): 852.825 MHz carries radio
+/// used to inherit: 852.825 MHz carries radio
 /// 5715173's talkgroup-57151 call, then a talkgroup-52103 call opened by an
 /// update.
 fn assert_callers_are_their_own(uploads: &[&Req]) {
@@ -474,7 +474,7 @@ fn assert_callers_are_their_own(uploads: &[&Req]) {
             "radio {src} is named as the caller of calls on talkgroups {tgs:?}"
         );
     }
-    // T-B7: radio 0 means "not named yet". It is never listed in `sources`
+    // Radio 0 means "not named yet". It is never listed in `sources`
     // (Keyup takes `sources[0]` as the caller), and a call whose radio is named
     // at any point uploads that radio as `source`; a call never named uploads
     // no `source` at all rather than a 0.
@@ -760,7 +760,7 @@ fn records_the_reference_capture_and_uploads_it() {
     // -- the site inventory Keyup is sent: no ghost bands or traffic --------
     // Every window, not just the last: a ghost published once is on Keyup's
     // site map. The inventory is fed each IDEN block twice (the `Tsbk` and
-    // the trunking layer's `IdenUpdate`) and must count it once (T-B2).
+    // the trunking layer's `IdenUpdate`) and must count it once.
     for (i, body) in observations
         .iter()
         .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())

@@ -525,7 +525,7 @@ mod tests {
         );
     }
 
-    /// T-D4: `UNIT_A1` exactly fills its first half, so a short call that
+    /// `UNIT_A1` exactly fills its first half, so a short call that
     /// carries only that half publishes nothing on its own — but the radio's
     /// earlier complete sighting names it. A different head, another radio, or
     /// a stale entry names nothing.

@@ -342,24 +342,47 @@ traffic_pool_size = 20
 # Phase 2 (TDMA) support wires up in build stage A6.
 phase2 = false
 
-# --- Conventional analog channels (not implemented yet) --------------------
+# --- Conventional analog channels -----------------------------------------
 
-# Accepted and validated, but logged as "not implemented yet" and skipped.
-# [[channel]]
-# name = "Fire Dispatch"
-# device = "hackrf0"
-# frequency = 154250000
-# mode = "nbfm"            # or "am"
-# enabled = true
-# bandwidth_hz = 12500     # 12500 narrowband, 25000 wideband
-# talkgroup = 14           # synthetic talkgroup id reported on calls
+# One [[channel]] per analog NBFM frequency. Each is cut out of a tuner's
+# capture by the same channelizer the P25 sites use, so it costs almost
+# nothing beyond the tuner it rides on. A recorded call is filed in Keyup as a
+# group call under (system, talkgroup) with `name` as its label.
 #
-# Squelch must come last: TOML sub-tables follow the scalar fields.
+# The fictional channel below is at 154.25 MHz, which the 855 MHz HackRF above
+# cannot hear: it needs a VHF tuner of its own, e.g.
+#
+# [[device]]
+# id = "vhf0"
+# driver = "sdrplay"
+# sample_rate = 2000000
+# center_frequency = 155000000
+#
+# [[channel]]
+# name = "Fire Dispatch"          # required; the call's talkgroupLabel
+# system = "Example County Fire"  # default: [uplink] system_label
+# site = "Example Hill"           # default: [uplink] site_label, then the device id
+# device = "vhf0"                 # default: the one device whose span covers `frequency`
+# frequency = 154250000           # Hz, required. Not on the tuner's centre (DC bin).
+# mode = "nbfm"                   # "am" is accepted but not recorded (skipped with a warning)
+# enabled = true
+# bandwidth_hz = 12500            # 12500 (+-2.5 kHz deviation) only; 25 kHz is not supported yet
+# talkgroup = 14                  # default: frequency / 1000 (154250); unique per system
+# tone = "167.9"                  # CTCSS Hz, or DCS "D445N" / "D445I" / "445". Unset: carrier squelch.
+# deemphasis_us = 750             # 0 disables
+#
+# Squelch must come last: TOML sub-tables follow the scalar fields. Every key
+# is optional; these are the defaults.
 # [channel.squelch]
-# noise_open = 0.1
-# noise_close = 0.19
-# hysteresis_open = 4
-# hysteresis_close = 6
+# open_db = 8.0                   # open this far above the noise floor...
+# close_db = 5.0                  # ...close at or below this; must be < open_db
+# attack_ms = 40
+# hang_ms = 1000                  # a re-key inside this continues the call
+# tone_timeout_ms = 750           # tone-gated: discard a carrier with no matching tone
+# max_call_s = 180                # longer transmissions are split
+# min_call_ms = 500               # shorter ones (kerchunks) are dropped
+# sdrtrunk's noise_open / noise_close / hysteresis_open / hysteresis_close are
+# accepted (the importer writes them) and ignored.
 
 # --- Health thresholds -----------------------------------------------------
 

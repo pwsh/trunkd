@@ -713,9 +713,8 @@ impl SiteInventory {
                 // decoded from, so a caller that forwards raw TSBKs has already
                 // folded this very block in above — with its TDMA fields.
                 // Folding it again would count one decode as two and confirm
-                // a one-off corrupt block on its own (the second path the
-                // 2026-09-22 review found, D1), and would publish a TDMA band
-                // as FDMA.
+                // a one-off corrupt block on its own, and would publish a TDMA
+                // band as FDMA.
                 if self.last_raw.is_some() {
                     return;
                 }
@@ -1862,7 +1861,7 @@ mod tests {
         inv.observe(851_050_000, &iden_echo(band), now_ms);
     }
 
-    /// Review 2026-09-22, D1: one decode reaches the inventory twice, and the
+    /// One decode reaches the inventory twice, and the
     /// `IdenUpdate` half used to be admitted with no plausibility check and no
     /// confirmation. One block must count as one sighting however it arrives.
     #[test]
@@ -1940,7 +1939,7 @@ mod tests {
         inv.snapshot(now_ms).traffic.iter().map(|t| t.hz).collect()
     }
 
-    /// Review 2026-09-22, D5: a grant decoded from a corrupt block used to put
+    /// A grant decoded from a corrupt block used to put
     /// a frequency in every snapshot for the rest of the run.
     #[test]
     fn a_traffic_frequency_expires_after_an_hour_without_a_grant() {

@@ -38,6 +38,7 @@ trunkd-core.workspace = true
 trunkd-sdr.workspace = true
 trunkd-supervisor.workspace = true
 trunkd-p25.workspace = true
+trunkd-analog.workspace = true
 trunkd-mbe.workspace = true
 trunkd-call.workspace = true
 trunkd-link.workspace = true

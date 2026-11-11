@@ -496,6 +496,9 @@ pub fn call_from_sidecar(text: &str) -> Option<FinishedCall> {
             .get("broadcastify")
             .cloned()
             .and_then(|v| serde_json::from_value::<BroadcastifyOutcome>(v).ok()),
+        // A conventional (analog) call's extras, so its retry is uploaded with
+        // them; `None` for every digital sidecar.
+        conventional: trunkd_call::conventional_from_sidecar(obj),
         // Measured when the call was assembled and written into the sidecar,
         // because the spooled copy is an MP3 and the PCM is long gone. A
         // sidecar written before the key existed reads as 0.0, which only ever

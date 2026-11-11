@@ -6,13 +6,17 @@
 //! `decodeConfigP25Phase1` / `decodeConfigNBFM` / `decodeConfigAM` decoders) and
 //! produces devices/sites/channels. Alias data and other elements are ignored.
 //!
-//! sdrtrunk playlists don't record concrete tuner hardware, so a single
-//! placeholder Soapy device is synthesized and referenced by everything.
+//! sdrtrunk playlists don't record concrete tuner hardware, so placeholder
+//! Soapy devices are synthesized: one per site, plus one per group of
+//! conventional channels no site tuner can hear (see `place_devices`).
 
 use serde::Deserialize;
 use trunkd_core::{Error, Result};
 
-use crate::config::{Backend, Channel, ChannelMode, Config, Device, PacingName, Site, Squelch};
+use crate::config::{
+    span_guard_hz, usable_span_hz, Backend, Channel, ChannelMode, Config, Device, PacingName, Site,
+    Squelch, CHANNEL_CONTROL_SPACING_HZ,
+};
 
 const PLACEHOLDER_DEVICE: &str = "sdr0";
 /// Center used when a playlist carries no frequency at all to derive one from.
@@ -78,15 +82,18 @@ impl DecodeConfig {
             .unwrap_or(12_500)
     }
 
-    /// Squelch settings, present only when the playlist carried all four
-    /// attributes.
+    /// sdrtrunk's squelch attributes, carried over as the legacy fields (which
+    /// trunkd accepts and ignores) so the import loses nothing; `None` when the
+    /// playlist has none of them.
     fn squelch(&self) -> Option<Squelch> {
-        Some(Squelch {
-            noise_open: self.squelch_noise_open?,
-            noise_close: self.squelch_noise_close?,
-            hysteresis_open: self.squelch_hysteresis_open?,
-            hysteresis_close: self.squelch_hysteresis_close?,
-        })
+        let sq = Squelch {
+            noise_open: self.squelch_noise_open,
+            noise_close: self.squelch_noise_close,
+            hysteresis_open: self.squelch_hysteresis_open,
+            hysteresis_close: self.squelch_hysteresis_close,
+            ..Squelch::default()
+        };
+        sq.has_legacy_fields().then_some(sq)
     }
 }
 
@@ -224,16 +231,27 @@ pub fn playlist_to_config(xml: &str) -> Result<Config> {
                 let is_am = decode.kind == "decodeConfigAM";
                 cfg.channel.push(Channel {
                     name: nonempty(&ch.name, "channel"),
-                    device: PLACEHOLDER_DEVICE.to_owned(),
+                    // The playlist's labels are how sdrtrunk filed these calls;
+                    // keeping them keeps the archive's talkgroups continuous.
+                    system: ch.system.trim().to_owned(),
+                    site: ch.site.trim().to_owned(),
+                    // Assigned by `place_devices`.
+                    device: String::new(),
                     frequency: freq,
                     mode: if is_am {
                         ChannelMode::Am
                     } else {
                         ChannelMode::Nbfm
                     },
-                    enabled,
+                    // A 25 kHz channel is kept but disabled: trunkd does not
+                    // record wideband channels yet, and an enabled one would
+                    // fail `trunkd check`.
+                    enabled: enabled && decode.bandwidth_hz() != 25_000,
                     bandwidth_hz: decode.bandwidth_hz(),
                     talkgroup: decode.talkgroup,
+                    tone: None,
+                    dcs_strict: false,
+                    deemphasis_us: None,
                     squelch: decode.squelch(),
                 });
             }
@@ -247,40 +265,129 @@ pub fn playlist_to_config(xml: &str) -> Result<Config> {
 }
 
 /// Give every imported site its own placeholder tuner, centered on that site's
-/// control channels.
+/// control channels, and put every conventional channel on a tuner that can
+/// actually hear it.
 ///
 /// An sdrtrunk playlist says nothing at all about the SDR: it is a list of
 /// frequencies. But trunkd will not start a site whose control channels fall
 /// outside its tuner's capture, and a single 2.4 MHz placeholder could not hold
 /// even one 700 MHz site — let alone the 700 and 800 MHz sites a real playlist
 /// mixes. So the importer derives what it *can* derive: one 20 MHz tuner per
-/// site, centered between that site's lowest and highest control channel. The
-/// operator still edits `backend`/`driver`/gain, but the config that comes out
-/// of `trunkd import` describes a receiver that could actually hear the sites
-/// it lists.
+/// site, centered between that site's lowest and highest control channel.
+///
+/// A conventional NBFM channel goes on a site tuner whose capture already holds
+/// it cleanly (inside the edge guard, off the DC bin, clear of that site's
+/// control channels); the rest are grouped by frequency onto extra placeholder
+/// tuners, each centered on its group and nudged off any channel's DC bin. AM
+/// channels are not recorded, so they never cause a tuner of their own: they
+/// stay on a covering tuner, else the first one. The operator still edits
+/// `backend`/`driver`/gain, but the config that comes out of `trunkd import`
+/// describes receivers that could actually hear what it lists.
 fn place_devices(cfg: &mut Config) {
-    if cfg.site.is_empty() {
-        // Analog-only playlist: keep the single placeholder, centered on the
-        // channels it will demodulate.
-        let freqs: Vec<u64> = cfg.channel.iter().map(|c| c.frequency).collect();
-        cfg.device[0].center_frequency = Some(span_center(&freqs).unwrap_or(DEFAULT_CENTER_HZ));
-        return;
+    let template = cfg.device[0].clone();
+    let placeholder = |n: usize, center: u64| Device {
+        id: format!("sdr{n}"),
+        center_frequency: Some(center),
+        ..template.clone()
+    };
+    let mut devices = Vec::with_capacity(cfg.site.len());
+    for site in cfg.site.iter_mut() {
+        let center = span_center(&site.control_frequencies).unwrap_or(DEFAULT_CENTER_HZ);
+        let d = placeholder(devices.len(), center);
+        site.device = d.id.clone();
+        devices.push(d);
     }
 
-    let template = cfg.device[0].clone();
-    let mut devices = Vec::with_capacity(cfg.site.len());
-    for (i, site) in cfg.site.iter_mut().enumerate() {
-        let id = format!("sdr{i}");
-        devices.push(Device {
-            id: id.clone(),
-            center_frequency: span_center(&site.control_frequencies).or(Some(DEFAULT_CENTER_HZ)),
-            ..template.clone()
-        });
-        site.device = id;
+    // NBFM channels no site tuner holds, grouped into captures of their own.
+    let mut homeless: Vec<usize> = Vec::new();
+    for (i, c) in cfg.channel.iter_mut().enumerate() {
+        if c.mode != ChannelMode::Nbfm {
+            continue;
+        }
+        match devices.iter().find(|d| holds(d, &cfg.site, c.frequency)) {
+            Some(d) => c.device = d.id.clone(),
+            None => homeless.push(i),
+        }
     }
-    // Analog channels stay on the first tuner; a playlist gives no way to know
-    // which capture they belong in, and the operator is editing these anyway.
+    homeless.sort_by_key(|&i| cfg.channel[i].frequency);
+    let mut group: Vec<usize> = Vec::new();
+    let flush = |group: &mut Vec<usize>, devices: &mut Vec<Device>, channels: &mut [Channel]| {
+        if group.is_empty() {
+            return;
+        }
+        let freqs: Vec<u64> = group.iter().map(|&i| channels[i].frequency).collect();
+        let mut center = span_center(&freqs).unwrap_or(DEFAULT_CENTER_HZ);
+        while freqs.iter().any(|f| f.abs_diff(center) < DC_CLEARANCE_HZ) {
+            center += DC_CLEARANCE_HZ;
+        }
+        let d = placeholder(devices.len(), center);
+        for &i in group.iter() {
+            channels[i].device = d.id.clone();
+        }
+        devices.push(d);
+        group.clear();
+    };
+    for &i in &homeless {
+        let f = cfg.channel[i].frequency;
+        if group
+            .first()
+            .is_some_and(|&g| f - cfg.channel[g].frequency > CHANNEL_GROUP_SPAN_HZ)
+        {
+            flush(&mut group, &mut devices, &mut cfg.channel);
+        }
+        group.push(i);
+    }
+    flush(&mut group, &mut devices, &mut cfg.channel);
+
+    if devices.is_empty() {
+        // Nothing but AM (or nothing at all): one placeholder centered on it.
+        let freqs: Vec<u64> = cfg.channel.iter().map(|c| c.frequency).collect();
+        devices.push(placeholder(
+            0,
+            span_center(&freqs).unwrap_or(DEFAULT_CENTER_HZ),
+        ));
+    }
+    for c in cfg
+        .channel
+        .iter_mut()
+        .filter(|c| c.mode != ChannelMode::Nbfm)
+    {
+        let covering = devices.iter().find(|d| {
+            usable_span_hz(d.center_frequency, d.sample_rate)
+                .is_some_and(|(lo, hi)| c.frequency >= lo && c.frequency <= hi)
+        });
+        c.device = covering.unwrap_or(&devices[0]).id.clone();
+    }
     cfg.device = devices;
+}
+
+/// Widest spread of channel frequencies one imported 20 MHz placeholder is
+/// given: leaves each edge its guard band plus room to step off a DC bin.
+const CHANNEL_GROUP_SPAN_HZ: u64 = 18_000_000;
+
+/// How far a channel must sit from its tuner's centre to be clear of the DC
+/// bin on either the one- or the two-bin channelizer path.
+const DC_CLEARANCE_HZ: u64 = 25_000;
+
+/// Whether `d` already holds a conventional channel at `freq` cleanly: inside
+/// its usable span less the edge guard, clear of its DC bin, and clear of the
+/// control candidates of every site it serves.
+fn holds(d: &Device, sites: &[Site], freq: u64) -> bool {
+    let (Some(center), Some((lo, hi))) = (
+        d.center_frequency,
+        usable_span_hz(d.center_frequency, d.sample_rate),
+    ) else {
+        return false;
+    };
+    let guard = span_guard_hz(d.sample_rate);
+    freq >= lo + guard
+        && freq + guard <= hi
+        && freq.abs_diff(center) >= DC_CLEARANCE_HZ
+        && !sites
+            .iter()
+            .filter(|s| s.device_ids().contains(&d.id.as_str()))
+            .flat_map(|s| &s.control_frequencies)
+            .any(|cc| cc.abs_diff(freq) < CHANNEL_CONTROL_SPACING_HZ)
 }
 
 /// Midpoint of the lowest and highest frequency in `freqs`.
@@ -398,8 +505,10 @@ mod tests {
         assert!(modes.contains(&ChannelMode::Am));
 
         // One placeholder tuner per site, each centered on its own control
-        // channels so the imported config actually validates.
-        assert_eq!(cfg.device.len(), cfg.site.len());
+        // channels so the imported config actually validates, then one more
+        // for the VHF NBFM channels the 770 MHz tuner cannot hear.
+        assert_eq!(cfg.device.len(), cfg.site.len() + 1);
+        assert_eq!(cfg.site[0].device, "sdr0");
         for (d, s) in cfg.device.iter().zip(&cfg.site) {
             let center = d.center_frequency.expect("importer sets a center");
             let half = u64::from(d.sample_rate) / 2;
@@ -425,11 +534,13 @@ mod tests {
         assert!(!disabled.enabled);
         assert_eq!(disabled.bandwidth_hz, 25_000);
         assert_eq!(disabled.talkgroup, Some(7));
+        // sdrtrunk's squelch numbers ride along as the ignored legacy fields.
         let sq = disabled.squelch.expect("squelch parsed");
-        assert_eq!(sq.noise_open, 0.1);
-        assert_eq!(sq.noise_close, 0.19);
-        assert_eq!(sq.hysteresis_open, 4);
-        assert_eq!(sq.hysteresis_close, 6);
+        assert_eq!(sq.noise_open, Some(0.1));
+        assert_eq!(sq.noise_close, Some(0.19));
+        assert_eq!(sq.hysteresis_open, Some(4));
+        assert_eq!(sq.hysteresis_close, Some(6));
+        assert_eq!(sq.open_db, None, "no dB threshold is invented");
 
         // A channel with no bandwidth attribute defaults to narrowband.
         let fire = cfg
@@ -439,6 +550,139 @@ mod tests {
             .expect("fire channel");
         assert_eq!(fire.bandwidth_hz, 12_500);
         assert!(fire.squelch.is_none());
+        // The playlist's labels come across, so calls keep their filing.
+        assert_eq!(
+            (fire.system.as_str(), fire.site.as_str()),
+            ("Local", "Fire")
+        );
+        assert_eq!(fire.tone, None);
+    }
+
+    /// Every channel's device; and an NBFM channel's device really covers it.
+    fn assert_placed(cfg: &Config) {
+        for c in &cfg.channel {
+            let d = cfg
+                .device
+                .iter()
+                .find(|d| d.id == c.device)
+                .unwrap_or_else(|| panic!("channel '{}' on unknown device '{}'", c.name, c.device));
+            if c.mode == ChannelMode::Nbfm {
+                assert!(
+                    holds(d, &cfg.site, c.frequency),
+                    "channel '{}' ({} Hz) not held by '{}' (center {:?})",
+                    c.name,
+                    c.frequency,
+                    d.id,
+                    d.center_frequency
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn places_channels_on_a_tuner_that_hears_them() {
+        // A VHF/UHF analog-only playlist cannot share one 20 MHz capture.
+        const ANALOG: &str = r#"<playlist version="4">
+  <channel system="Example County Fire" site="Example Hill" name="Fire Dispatch" enabled="true">
+    <decode_configuration type="decodeConfigNBFM" bandwidth="BW_12_5" talkgroup="1"/>
+    <source_configuration type="sourceConfigTuner" frequency="154250000"/>
+  </channel>
+  <channel system="Example County Fire" site="Example Hill" name="Fireground" enabled="true">
+    <decode_configuration type="decodeConfigNBFM" bandwidth="BW_12_5" talkgroup="2"/>
+    <source_configuration type="sourceConfigTuner" frequency="154400000"/>
+  </channel>
+  <channel system="Example County Fire" site="Example Hill" name="Tac" enabled="true">
+    <decode_configuration type="decodeConfigNBFM" bandwidth="BW_12_5" talkgroup="3"/>
+    <source_configuration type="sourceConfigTuner" frequency="154325000"/>
+  </channel>
+  <channel system="Example Schools" site="Campus" name="Buses" enabled="true">
+    <decode_configuration type="decodeConfigNBFM" bandwidth="BW_25_0" talkgroup="1"/>
+    <source_configuration type="sourceConfigTuner" frequency="462500000"/>
+  </channel>
+  <channel system="Example Air" site="Field" name="Tower" enabled="true">
+    <decode_configuration type="decodeConfigAM"/>
+    <source_configuration type="sourceConfigTuner" frequency="118500000"/>
+  </channel>
+</playlist>"#;
+        let cfg = playlist_to_config(ANALOG).expect("parse");
+        assert!(cfg.site.is_empty());
+        assert_eq!(
+            cfg.device.len(),
+            2,
+            "one VHF and one UHF tuner: {:?}",
+            cfg.device
+        );
+        let dev = |name: &str| {
+            cfg.channel
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.device.as_str())
+                .expect("channel")
+        };
+        assert_eq!(dev("Fire Dispatch"), dev("Fireground"));
+        assert_eq!(dev("Fire Dispatch"), dev("Tac"));
+        assert_ne!(dev("Fire Dispatch"), dev("Buses"));
+        // The 25 kHz channel comes across disabled (wideband is not supported).
+        let buses = cfg
+            .channel
+            .iter()
+            .find(|c| c.name == "Buses")
+            .expect("buses");
+        assert!(!buses.enabled);
+        assert_eq!(buses.bandwidth_hz, 25_000);
+        // The VHF group's midpoint is exactly the Tac channel: the centre is
+        // stepped off it so the channel is not on the DC bin.
+        let vhf = cfg
+            .device
+            .iter()
+            .find(|d| d.id == dev("Tac"))
+            .expect("tuner");
+        assert_ne!(vhf.center_frequency, Some(154_325_000));
+        // AM is not recorded, so it gets no tuner of its own.
+        assert_eq!(dev("Tower"), "sdr0");
+        assert_placed(&cfg);
+        cfg.validate().expect("imported analog config is valid");
+    }
+
+    #[test]
+    fn a_channel_inside_a_site_capture_shares_its_tuner() {
+        const SHARED: &str = r#"<playlist version="4">
+  <channel system="Example System" site="Example County" name="Control" enabled="true">
+    <decode_configuration type="decodeConfigP25Phase1"/>
+    <source_configuration type="sourceConfigTunerMultipleFrequency">
+      <frequency>460100000</frequency>
+      <frequency>460300000</frequency>
+    </source_configuration>
+  </channel>
+  <channel system="Example Works" site="Yard" name="Works" enabled="true">
+    <decode_configuration type="decodeConfigNBFM" talkgroup="5"/>
+    <source_configuration type="sourceConfigTuner" frequency="462550000"/>
+  </channel>
+  <channel system="Example Works" site="Yard" name="On Control" enabled="false">
+    <decode_configuration type="decodeConfigNBFM" talkgroup="6"/>
+    <source_configuration type="sourceConfigTuner" frequency="460300000"/>
+  </channel>
+</playlist>"#;
+        let cfg = playlist_to_config(SHARED).expect("parse");
+        let works = cfg
+            .channel
+            .iter()
+            .find(|c| c.name == "Works")
+            .expect("works");
+        assert_eq!(
+            works.device, cfg.site[0].device,
+            "inside the site's capture"
+        );
+        // On a control channel: the site tuner cannot take it, a new one does.
+        let on_cc = cfg
+            .channel
+            .iter()
+            .find(|c| c.name == "On Control")
+            .expect("cc");
+        assert_ne!(on_cc.device, cfg.site[0].device);
+        assert_eq!(cfg.device.len(), 2);
+        assert_placed(&cfg);
+        cfg.validate().expect("valid");
     }
 
     #[test]
@@ -623,7 +867,9 @@ mod tests {
         assert_eq!(nbfm.len(), 3, "NBFM channels: {nbfm:?}");
         for c in &nbfm {
             assert!(c.frequency > 0, "channel '{}' has no frequency", c.name);
+            assert_eq!(c.system, "Example Analog");
         }
+        assert_placed(&cfg);
 
         // DMR is out of scope and must not be imported.
         assert!(

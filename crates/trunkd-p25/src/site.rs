@@ -1195,7 +1195,7 @@ impl SiteEngine {
                 // keeps the talker the grant named — but only while it is the
                 // same call. A grant for another kind, talkgroup or target is
                 // another call, and the radio that keyed the previous one on
-                // this frequency is not its caller (review 2026-09-22, D3).
+                // this frequency is not its caller.
                 let same_call =
                     meta.kind == *kind && meta.talkgroup == *talkgroup && meta.target == *target;
                 meta.kind = *kind;
@@ -1780,7 +1780,7 @@ impl SiteEngine {
         // knows whether a traffic-side word confirmed the talker before a
         // block arrived, which blocks were the previous talker's, and what
         // this radio was heard with before — the assembler sees one
-        // transmission and files every block in it (review T-D4).
+        // transmission and files every block in it.
         record.talker_alias = call.talker_alias();
         if record.source_wacn.is_none() {
             record.source_wacn = call.source_wacn;
@@ -1969,7 +1969,7 @@ impl SiteEngine {
                 };
                 // Held until a traffic-side word names the talker: before
                 // that, the block may be the rest of the previous
-                // transmission's cycle (the residual cross-call leak, T-D4).
+                // transmission's cycle (the residual cross-call leak).
                 // Released through the same checks once the talker is
                 // confirmed, dropped if another talker is named first.
                 if !call.talker_confirmed {
@@ -2995,7 +2995,7 @@ mod tests {
         }
     }
 
-    /// Review 2026-09-22, D3: a frequency re-granted inside its hang window,
+    /// A frequency re-granted inside its hang window,
     /// where the first thing heard is a grant *update* (which names no radio),
     /// used to start the new call attributed to the previous call's talker.
     #[test]
@@ -3036,7 +3036,7 @@ mod tests {
         assert_eq!(ended[1].2.source, None, "and its record names nobody");
     }
 
-    /// Review 2026-09-22, D4, end to end: one corrupt IDEN for the band in use
+    /// End to end: one corrupt IDEN for the band in use
     /// does not move the next grant; two identical ones do.
     #[test]
     fn one_corrupt_iden_cannot_move_a_known_band_under_the_grants() {
@@ -3349,7 +3349,7 @@ mod tests {
 
     // -- Phase 2 (TDMA) grants -------------------------------------------------
 
-    /// Review 2026-09-22 §4 gap 2 (T-D1): a grant on a TDMA channel — the band
+    /// A grant on a TDMA channel — the band
     /// plan's opcode-51 channel type says so — is refused before anything is
     /// spent on it: no channel, no call, no pool slot, no `GrantOut` for a
     /// sibling tuner. It is counted once per call, and flagged as the first
@@ -3912,7 +3912,7 @@ mod tests {
         }
     }
 
-    /// T-D4: a block that arrives before any traffic-side word has named the
+    /// A block that arrives before any traffic-side word has named the
     /// talker is held, and filed only once one does — here the talker's own
     /// head, sent in the first LDU1 ahead of its LCO 0.
     #[test]
@@ -4021,7 +4021,7 @@ mod tests {
         );
     }
 
-    /// T-D4 per-radio memory: `UNIT_A1` exactly fills its first half, so a
+    /// Per-radio alias memory: `UNIT_A1` exactly fills its first half, so a
     /// call that carries only that half cannot be named from the air alone —
     /// but radio 9000102 was heard with it complete, so it is. A radio with no
     /// complete sighting is still never named from a head.
@@ -4248,7 +4248,7 @@ mod tests {
         );
     }
 
-    // -- one filterbank per capture (review 2026-09-22, T-C1) ----------------
+    // -- one filterbank per capture -------------------------------------------
 
     /// Two more candidates either side of `CONTROL`, inside the 1 MHz capture.
     const WEST: u64 = 851_900_000;

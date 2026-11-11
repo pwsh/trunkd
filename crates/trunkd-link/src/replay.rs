@@ -2,7 +2,7 @@
 //! Replay protection for received frames.
 //!
 //! The link used to keep "the last sequence accepted" per UDP source address.
-//! That had two holes (review 2026-09-22, C4/C5):
+//! That had two holes:
 //!
 //! * the source address is not authenticated, so a captured datagram resent
 //!   from another port (or another spoofed address) met fresh state and was
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn frames_may_arrive_in_any_order() {
-        // C5: the original of seq 9 was lost; seq 10 overtook its
+        // The original of seq 9 was lost; seq 10 overtook its
         // retransmission. Both are new.
         let mut c = ReplayCache::default();
         assert_eq!(c.check(n(1, 10), NOW, NOW, addr(1)), Verdict::Fresh);

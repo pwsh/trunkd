@@ -18,7 +18,7 @@
 //!
 //! Besides the calls, the replay is graded on what the control channel
 //! decoded and on the rules that keep a corrupt block out of the recorder's
-//! state (review 2026-09-22, T-B2): the band plan grants resolve through and
+//! state: the band plan grants resolve through and
 //! the one the inventory publishes are exactly the site's two bands, every
 //! traffic frequency is one the capture really carried, and no call is
 //! attributed to a radio that keyed a previous call on its frequency.
@@ -459,7 +459,7 @@ fn decodes_the_reference_site_from_a_wideband_capture() {
         "every call rides one of the capture's voice frequencies"
     );
 
-    // Caller attribution (review D3). A call starts with the radio its grant
+    // Caller attribution. A call starts with the radio its grant
     // named, or with nobody when only a grant update (which names no radio)
     // was heard — never with the previous caller on that frequency. The
     // capture has the case: 852.825 MHz carries a talkgroup-57151
@@ -550,9 +550,10 @@ fn decodes_the_reference_site_from_a_wideband_capture() {
     // the first half of its alias — seven octets with no NUL — so the field
     // may continue and nothing is published. This assertion used to expect
     // that half-alias; it went unchecked while the test skipped in debug
-    // builds, and 153fe58 deliberately stopped publishing half a field.
+    // builds, and the decoder was later changed on purpose to stop publishing
+    // half a field.
     //
-    // The engine's per-radio alias memory (T-D4) names such a head when the
+    // The engine's per-radio alias memory names such a head when the
     // same radio was heard earlier with the complete alias — but this 60 s
     // capture never carries this radio's complete alias, so there is nothing
     // to recall and the call stays unnamed (the recall itself is covered by

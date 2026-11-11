@@ -304,6 +304,14 @@ pub(crate) struct MonitorSub {
     rx: Receiver<Chunk>,
 }
 
+#[cfg(test)]
+impl MonitorSub {
+    /// The next queued chunk, if any (tests outside this module).
+    pub(crate) fn try_next(&self) -> Option<Chunk> {
+        self.rx.try_recv().ok()
+    }
+}
+
 impl Drop for MonitorSub {
     fn drop(&mut self) {
         self.hub.unsubscribe(self.id);

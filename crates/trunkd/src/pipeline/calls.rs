@@ -41,11 +41,24 @@
 //! that has had no message at all for the orphan bound (see [`run`]) is closed
 //! with reason `orphaned` ([`ORPHANED`]) — its claim released, and what it has
 //! delivered under exactly the rules a normal end applies.
+//!
+//! # Conventional (analog) calls
+//!
+//! A `[[channel]]`'s calls arrive as [`CallMsg::ConvStarted`], `ConvPcm` and
+//! `ConvEnded`, already demodulated to 8 kHz PCM on the DSP thread, so there is
+//! no vocoder here: the PCM is appended, published to the live monitor in
+//! 20 ms slices, and the call is filed per the keyup upload contract — a group call under the
+//! channel's system, site, talkgroup and name, with the analog extras
+//! ([`trunkd_call::ConventionalInfo`]). One call is open per channel at a
+//! time; a `ConvStarted` arriving while one is still open means its `ConvEnded`
+//! was evicted, so the old call is closed as orphaned first. The orphan sweep
+//! covers them like any other call. They are counted under
+//! `calls.conventional_*`, apart from the P25 totals.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use trunkd_call::{CallBuilder, FinishedCall};
+use trunkd_call::{CallBuilder, ConventionalInfo, FinishedCall};
 use trunkd_core::chan::BoundedReceiver;
 use trunkd_mbe::ImbeDecoder;
 use trunkd_p25::call::CallRecord;
@@ -162,6 +175,33 @@ struct OpenCall {
     known: CallRecord,
 }
 
+/// One conventional call being assembled.
+struct ConvCall {
+    /// Call id, as the DSP thread tagged it.
+    id: u64,
+    /// The channel and its labels.
+    spec: std::sync::Arc<crate::pipeline::conventional::ChannelSpec>,
+    builder: CallBuilder,
+    /// The analog extras so far; the end measurements land at `ConvEnded`.
+    info: ConventionalInfo,
+    /// Live-monitor identity, when `[server] live_audio` is on.
+    monitor: Option<crate::pipeline::monitor::CallAudioMeta>,
+    /// The device's wideband level gauge, read at call end.
+    rssi: Option<trunkd_core::Metric>,
+    /// When the last message for this call arrived, for the orphan sweep.
+    last_seen: Instant,
+}
+
+/// The Activity view's spelling of why a conventional call ended.
+fn conv_reason_name(reason: trunkd_analog::EndReason) -> &'static str {
+    match reason {
+        trunkd_analog::EndReason::SquelchClosed => "squelch closed",
+        trunkd_analog::EndReason::ToneLost => "tone lost",
+        trunkd_analog::EndReason::MaxDuration => "max duration",
+        trunkd_analog::EndReason::Shutdown => "shutdown",
+    }
+}
+
 /// The wideband level a device's gauge is currently reporting, or `None` when
 /// it has never published one.
 ///
@@ -209,6 +249,8 @@ pub(crate) fn run(
     monitor: Option<std::sync::Arc<crate::pipeline::monitor::MonitorHub>>,
 ) {
     let mut open: HashMap<(usize, CallId), OpenCall> = HashMap::new();
+    // Conventional calls, by channel index: at most one open per channel.
+    let mut conv: HashMap<usize, ConvCall> = HashMap::new();
     let started = shared.metrics.counter("calls.started");
     let ended = shared.metrics.counter("calls.ended");
     let dropped = shared.metrics.counter("calls.dropped_insubstantive");
@@ -339,6 +381,49 @@ pub(crate) fn run(
         delivery.deliver(finished);
     };
 
+    // Conventional counters, apart from the P25 totals above. Resolved lazily
+    // by name on these rare paths only, so a recorder with no channel never
+    // registers them.
+    let conv_counter = |name: &str| {
+        shared
+            .metrics
+            .counter(&format!("calls.conventional_{name}"))
+    };
+
+    // A conventional call is over, however it ended: Activity row, extras,
+    // and the one gate that applies to demodulated audio (it must have some).
+    let finish_conv = |mut call: ConvCall, end_ms: i64, reason: &'static str| {
+        conv_counter("ended").inc();
+        let frames = (call.builder.sample_count() / 160) as u32;
+        shared.calls.ended(call.id, end_ms, frames, reason);
+        call.builder.set_conventional(Some(call.info));
+        call.builder.set_rssi_dbfs(rssi_dbfs(call.rssi.as_ref()));
+        let finished = call.builder.finish(end_ms);
+        if finished.pcm.is_empty() {
+            conv_counter("no_audio").inc();
+            shared.calls.outcome(call.id, "no audio");
+            tracing::debug!(channel = %call.spec.display, reason, "not uploading a conventional call with no audio");
+            return;
+        }
+        tracing::info!(
+            channel = %call.spec.display,
+            talkgroup = finished.talkgroup,
+            frequency_hz = finished.frequency_hz,
+            duration_s = format_args!("{:.1}", finished.duration_s()),
+            reason,
+            "conventional call ended"
+        );
+        conv_counter("delivered").inc();
+        shared.calls.outcome(call.id, "delivered");
+        delivery.deliver(finished);
+    };
+    // The end of an orphaned call: when its last message arrived.
+    let orphan_end_ms = |last_seen: Instant, now: Instant| {
+        let idle = now.duration_since(last_seen);
+        trunkd_core::Timestamp::now().unix_millis()
+            - i64::try_from(idle.as_millis()).unwrap_or(i64::MAX)
+    };
+
     // The sweep runs on its own cadence whether or not messages are flowing:
     // a busy queue never times out, and a busy queue is exactly when an
     // `Ended` gets evicted.
@@ -383,6 +468,28 @@ pub(crate) fn run(
                 );
                 let known = std::mem::take(&mut call.known);
                 finish(site, id, call, &known, end_ms, ORPHANED_REASON);
+            }
+            // Conventional calls the same way; an empty map on a recorder
+            // with no channel.
+            let lost: Vec<usize> = conv
+                .iter()
+                .filter(|(_, c)| now.duration_since(c.last_seen) >= orphan_after)
+                .map(|(k, _)| *k)
+                .collect();
+            for channel in lost {
+                let Some(mut call) = conv.remove(&channel) else {
+                    continue;
+                };
+                orphaned_calls.inc();
+                tracing::warn!(
+                    channel = %call.spec.display,
+                    call = call.id,
+                    queue_dropped = shared.metrics.counter(QUEUE_DROPPED).get(),
+                    "closing a conventional call whose end never arrived (orphaned)"
+                );
+                call.info.squelch_reason = Some(ORPHANED_REASON.to_owned());
+                let end_ms = orphan_end_ms(call.last_seen, now);
+                finish_conv(call, end_ms, ORPHANED_REASON);
             }
         }
         let Some(msg) = msg else {
@@ -536,7 +643,7 @@ pub(crate) fn run(
                 // A talker change retires the previous talker's alias: the
                 // engine reports the new talker with `alias: None` and only
                 // names it once its own alias blocks have all arrived. Radio 0
-                // is "not named yet" (T-B7), never a new talker, so it retires
+                // is "not named yet", never a new talker, so it retires
                 // nothing — and `CallBuilder::talker` keeps it out of `sources`.
                 if source != 0 && call.alias_of.is_some_and(|prev| prev != source) {
                     call.alias = None;
@@ -636,6 +743,117 @@ pub(crate) fn run(
                 };
                 finish(site, id, call, &record, at_ms as i64, reason_name(reason));
             }
+
+            CallMsg::ConvStarted {
+                spec,
+                id,
+                start,
+                rssi,
+                at_ms,
+            } => {
+                // A call still open on this channel lost its `ConvEnded` to the
+                // queue: close it before the new one takes the slot.
+                if let Some(mut old) = conv.remove(&spec.index) {
+                    orphaned_calls.inc();
+                    tracing::warn!(
+                        channel = %old.spec.display,
+                        call = old.id,
+                        "closing a conventional call whose end never arrived (orphaned)"
+                    );
+                    old.info.squelch_reason = Some(ORPHANED_REASON.to_owned());
+                    let end_ms = orphan_end_ms(old.last_seen, Instant::now());
+                    finish_conv(old, end_ms, ORPHANED_REASON);
+                }
+                let start_ms = at_ms as i64;
+                let mut builder = CallBuilder::new(
+                    spec.system_label.clone(),
+                    spec.site_label.clone(),
+                    start_ms,
+                    spec.frequency_hz,
+                    spec.talkgroup,
+                )
+                .with_max_duration(max_call_duration);
+                builder.set_talkgroup_label(Some(spec.name.clone()));
+                builder.set_instance(instance_id.clone());
+                shared.calls.started(crate::pipeline::CallStart {
+                    id,
+                    site: spec.display.clone(),
+                    kind: "conventional",
+                    talkgroup: Some(spec.talkgroup),
+                    source: 0,
+                    target: None,
+                    frequency_hz: spec.frequency_hz,
+                    started_at_ms: start_ms,
+                });
+                conv_counter("started").inc();
+                tracing::debug!(channel = %spec.display, call = id, "conventional call started");
+                let monitor_meta = monitor.as_ref().map(|_| {
+                    crate::pipeline::monitor::CallAudioMeta::new(
+                        id,
+                        Some(spec.talkgroup),
+                        CallKind::Group,
+                        0,
+                        Some(spec.device_id.as_str()),
+                        spec.frequency_hz,
+                    )
+                });
+                let info = ConventionalInfo {
+                    tone: spec.tone.clone(),
+                    tone_detected: start.tone_detected.map(|t| t.to_string()),
+                    snr_db: Some(start.snr_db),
+                    ..ConventionalInfo::nbfm()
+                };
+                conv.insert(
+                    spec.index,
+                    ConvCall {
+                        id,
+                        spec,
+                        builder,
+                        info,
+                        monitor: monitor_meta,
+                        rssi,
+                        last_seen: Instant::now(),
+                    },
+                );
+            }
+
+            CallMsg::ConvPcm { channel, id, pcm } => {
+                let Some(call) = conv.get_mut(&channel).filter(|c| c.id == id) else {
+                    orphaned.inc();
+                    continue;
+                };
+                call.last_seen = Instant::now();
+                // The monitor takes 20 ms frames, as the IMBE path gives it.
+                if let (Some(hub), Some(meta)) = (&monitor, &call.monitor) {
+                    for frame in pcm.chunks(trunkd_analog::FRAME_SAMPLES) {
+                        hub.publish(meta, frame);
+                    }
+                }
+                call.builder.push_pcm(&pcm);
+            }
+
+            CallMsg::ConvEnded {
+                channel,
+                id,
+                end,
+                at_ms,
+            } => {
+                if !conv.get(&channel).is_some_and(|c| c.id == id) {
+                    orphaned.inc();
+                    continue;
+                }
+                let Some(mut call) = conv.remove(&channel) else {
+                    continue;
+                };
+                call.info.squelch_reason = Some(end.reason.as_str().to_owned());
+                if let Some(t) = end.tone_detected {
+                    call.info.tone_detected = Some(t.to_string());
+                }
+                call.info.snr_db = Some(end.snr_db);
+                call.info.peak_deviation_hz = Some(end.peak_deviation_hz);
+                call.info.offset_hz = Some(end.offset_hz);
+                finish_conv(call, at_ms as i64, conv_reason_name(end.reason));
+            }
         }
     }
 
@@ -650,6 +868,12 @@ pub(crate) fn run(
             call.builder.set_rssi_dbfs(level);
             delivery.deliver(call.builder.finish(end_ms));
         }
+    }
+    // Conventional calls the engines' own `finish` did not close (their
+    // `ConvEnded` was lost): delivered with what they have.
+    for (_, mut call) in conv.drain() {
+        call.info.squelch_reason = Some("shutdown".to_owned());
+        finish_conv(call, end_ms, "shutdown");
     }
 }
 
@@ -1585,7 +1809,7 @@ mod tests {
         assert_eq!(metrics.counter("calls.dropped_no_audio").get(), 0);
     }
 
-    /// Review 2026-09-22 §3.2 (T-C3): the per-frame path — vocode, count,
+    /// The per-frame path — vocode, count,
     /// append — makes no heap allocation of its own. What is left is the PCM
     /// buffer, which is sized once for a typical call at its first frame and
     /// grows at most a few times after, so a 10 s call costs the same number
@@ -1614,6 +1838,271 @@ mod tests {
         assert!(
             thirty_s <= one_s + 2,
             "past 10 s the buffer grows at most twice"
+        );
+    }
+
+    // -- conventional (analog) calls ----------------------------------------
+
+    use crate::pipeline::conventional::{call_id, ChannelSpec};
+
+    fn channel(index: usize) -> std::sync::Arc<ChannelSpec> {
+        std::sync::Arc::new(ChannelSpec {
+            index,
+            name: "Fire Dispatch".into(),
+            system_label: "Example County Fire".into(),
+            site_label: "Example Hill".into(),
+            device_id: "vhf".into(),
+            frequency_hz: 154_250_000,
+            talkgroup: 14,
+            tone: Some("167.9".into()),
+            metric_prefix: format!("channel.{index}"),
+            display: "Example County Fire/Fire Dispatch".into(),
+            params: trunkd_analog::ChannelParams::default(),
+        })
+    }
+
+    fn tone(s: &str) -> trunkd_analog::Tone {
+        s.parse().expect("tone")
+    }
+
+    fn conv_started(index: usize, seq: u64, at_ms: u64) -> CallMsg {
+        CallMsg::ConvStarted {
+            spec: channel(index),
+            id: call_id(index, seq),
+            start: trunkd_analog::CallStart {
+                at_ms: 1_000,
+                power_dbfs: -30.0,
+                snr_db: 21.5,
+                tone_detected: Some(tone("167.9")),
+            },
+            rssi: None,
+            at_ms,
+        }
+    }
+
+    fn conv_pcm(index: usize, seq: u64, frames: usize) -> CallMsg {
+        CallMsg::ConvPcm {
+            channel: index,
+            id: call_id(index, seq),
+            pcm: vec![4_000i16; frames * 160],
+        }
+    }
+
+    fn conv_ended(index: usize, seq: u64, at_ms: u64) -> CallMsg {
+        CallMsg::ConvEnded {
+            channel: index,
+            id: call_id(index, seq),
+            end: trunkd_analog::CallEnd {
+                at_ms: 3_000,
+                reason: trunkd_analog::EndReason::SquelchClosed,
+                duration_ms: 2_000,
+                tone_detected: Some(tone("167.9")),
+                power_dbfs: -30.0,
+                snr_db: 20.04,
+                peak_deviation_hz: 2_480.0,
+                offset_hz: -55.0,
+            },
+            at_ms,
+        }
+    }
+
+    /// Drive the call thread with a live monitor hub attached.
+    fn drive_monitored(
+        msgs: Vec<CallMsg>,
+        hub: std::sync::Arc<crate::pipeline::monitor::MonitorHub>,
+    ) -> (Vec<FinishedCall>, Shared) {
+        let shared = Shared {
+            private_calls: Default::default(),
+            calls: Default::default(),
+            skip: trunkd_core::SkipList::empty(),
+            replay_clock: Default::default(),
+            metrics: trunkd_core::Metrics::new(),
+            sites: std::sync::Arc::new(Vec::new()),
+        };
+        let (tx, rx) = trunkd_core::chan::bounded::<CallMsg>(msgs.len().max(16));
+        for m in msgs {
+            tx.send(m);
+        }
+        drop(tx);
+        let collector = Collector::default();
+        run(
+            rx,
+            shared.clone(),
+            Box::new(collector.clone()),
+            Duration::from_secs(180),
+            default_min_voice_frames(),
+            MIN_ORPHAN_AFTER,
+            Some("rec-test-01".to_owned()),
+            None,
+            Some(hub),
+        );
+        let out = collector.0.lock().expect("collector").clone();
+        (out, shared)
+    }
+
+    /// A conventional call is filed per the keyup upload contract — a group call under the
+    /// channel's system, site, talkgroup and name, one frequency, no radios —
+    /// with the analog extras, and the monitor hears it in 20 ms frames.
+    #[test]
+    fn a_conventional_call_is_assembled_per_the_keyup_contract() {
+        let hub = crate::pipeline::monitor::MonitorHub::new();
+        let sub = hub
+            .subscribe(crate::pipeline::monitor::Filter::Talkgroup(14))
+            .expect("a monitor slot");
+        let t0 = 1_788_012_000_000;
+        let msgs = vec![
+            conv_started(0, 0, t0),
+            conv_pcm(0, 0, 5),
+            conv_pcm(0, 0, 5),
+            conv_ended(0, 0, t0 + 200),
+        ];
+        let (calls, shared) = drive_monitored(msgs, hub);
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        assert_eq!(c.system, "Example County Fire");
+        assert_eq!(c.site, "Example Hill");
+        assert_eq!(c.talkgroup, 14);
+        assert_eq!(c.talkgroup_label.as_deref(), Some("Fire Dispatch"));
+        assert_eq!(c.call_kind, trunkd_call::CallKind::Group);
+        assert_eq!(c.frequency_hz, 154_250_000);
+        assert_eq!(c.frequencies.len(), 1);
+        assert!(c.sources.is_empty() && c.source.is_none(), "no radio ids");
+        assert_eq!(
+            (c.started_at_ms, c.ended_at_ms),
+            (t0 as i64, t0 as i64 + 200)
+        );
+        assert_eq!(c.pcm.len(), 1_600);
+        assert_eq!(
+            c.source_quality
+                .as_ref()
+                .and_then(|q| q.instance.as_deref()),
+            Some("rec-test-01")
+        );
+        let info = c.conventional.as_ref().expect("analog extras");
+        assert_eq!(info.mode, "nbfm");
+        assert_eq!(info.decoder, "NBFM");
+        assert_eq!(info.tone.as_deref(), Some("167.9"));
+        assert_eq!(info.tone_detected.as_deref(), Some("167.9"));
+        assert_eq!(info.squelch_reason.as_deref(), Some("squelch_closed"));
+        assert_eq!(info.snr_db, Some(20.04));
+        assert_eq!(info.peak_deviation_hz, Some(2_480.0));
+        assert_eq!(info.offset_hz, Some(-55.0));
+
+        // The monitor got every 20 ms frame, each exactly 160 samples.
+        let mut frames = 0;
+        while let Some(f) = sub.try_next() {
+            assert_eq!(f.pcm.len(), 160);
+            frames += 1;
+        }
+        assert_eq!(frames, 10);
+
+        let m = &shared.metrics;
+        assert_eq!(m.counter("calls.conventional_started").get(), 1);
+        assert_eq!(m.counter("calls.conventional_delivered").get(), 1);
+        assert_eq!(m.counter("calls.started").get(), 0, "P25 totals untouched");
+        let recent = shared.calls.recent();
+        assert_eq!(recent[0].kind, "conventional");
+        assert_eq!(recent[0].talkgroup, Some(14));
+        assert_eq!(recent[0].reason, Some("squelch closed"));
+        assert_eq!(recent[0].outcome, Some("delivered"));
+        assert_eq!(recent[0].voice_frames, 10);
+    }
+
+    /// The queue evicted a call's `ConvEnded`; the channel's next
+    /// `ConvStarted` closes it as orphaned (with its audio) before opening.
+    /// Messages for a call that is not open are counted, not applied.
+    #[test]
+    fn a_lost_conventional_end_is_closed_by_the_next_start() {
+        let hub = crate::pipeline::monitor::MonitorHub::new();
+        let msgs = vec![
+            conv_started(0, 0, 1_000),
+            conv_pcm(0, 0, 10),
+            // seq 0's ConvEnded was evicted.
+            conv_started(0, 1, 5_000),
+            conv_pcm(0, 0, 3), // late audio for the closed call
+            conv_pcm(0, 1, 10),
+            conv_ended(0, 1, 5_400),
+            conv_ended(0, 0, 9_000), // late end for the closed call
+        ];
+        let (calls, shared) = drive_monitored(msgs, hub);
+        assert_eq!(calls.len(), 2, "both calls are delivered once");
+        let orphan = &calls[0];
+        assert_eq!(orphan.pcm.len(), 1_600);
+        assert_eq!(
+            orphan
+                .conventional
+                .as_ref()
+                .and_then(|i| i.squelch_reason.as_deref()),
+            Some("orphaned")
+        );
+        assert_eq!(
+            calls[1]
+                .conventional
+                .as_ref()
+                .and_then(|i| i.squelch_reason.as_deref()),
+            Some("squelch_closed")
+        );
+        assert_eq!(
+            calls[1].pcm.len(),
+            1_600,
+            "no stray audio from the old call"
+        );
+        let m = &shared.metrics;
+        assert_eq!(m.counter(ORPHANED).get(), 1);
+        assert_eq!(m.counter("calls.orphaned_events").get(), 2);
+        assert_eq!(m.counter("calls.conventional_ended").get(), 2);
+    }
+
+    /// Two channels are independent; a call still open when the DSP side
+    /// goes away is delivered at shutdown, and one with no audio is not.
+    #[test]
+    fn open_conventional_calls_are_flushed_at_shutdown() {
+        let hub = crate::pipeline::monitor::MonitorHub::new();
+        let msgs = vec![
+            conv_started(0, 0, 1_000),
+            conv_started(1, 0, 1_000),
+            conv_pcm(1, 0, 4),
+        ];
+        let (calls, shared) = drive_monitored(msgs, hub);
+        assert_eq!(calls.len(), 1, "only the call with audio");
+        assert_eq!(calls[0].pcm.len(), 640);
+        assert_eq!(
+            calls[0]
+                .conventional
+                .as_ref()
+                .and_then(|i| i.squelch_reason.as_deref()),
+            Some("shutdown")
+        );
+        assert_eq!(
+            shared.metrics.counter("calls.conventional_no_audio").get(),
+            1
+        );
+    }
+
+    /// The sweep closes a conventional call whose end never arrived, like a
+    /// P25 one: reason `orphaned`, its audio delivered.
+    #[test]
+    fn the_sweep_closes_an_orphaned_conventional_call() {
+        let mut live = Live::start(Duration::from_millis(200));
+        live.send(conv_started(2, 0, 1_000));
+        live.send(conv_pcm(2, 0, 5));
+        live.wait_for("the sweep", |l| l.counter(ORPHANED) == 1);
+        live.stop();
+        let calls = live.delivered();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pcm.len(), 800);
+        assert_eq!(
+            calls[0]
+                .conventional
+                .as_ref()
+                .and_then(|i| i.squelch_reason.as_deref()),
+            Some("orphaned")
+        );
+        assert_eq!(live.shared.calls.recent()[0].reason, Some("orphaned"));
+        assert_eq!(
+            live.link.open_claims(),
+            0,
+            "conventional calls claim nothing"
         );
     }
 }

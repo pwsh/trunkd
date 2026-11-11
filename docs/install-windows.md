@@ -178,5 +178,12 @@ Once capture is verified, install it as a service: [windows-service.md](windows-
 * **What is portable.** Everything OS-specific has a Windows branch: the spool free-space floor uses
   `GetDiskFreeSpaceExW`, Ctrl+C and service stops share one shutdown path, HTTP uses rustls (no
   OpenSSL), and the panel works the same. Real-time priority is Linux-only.
+* **Conventional channels** (`[[channel]]`, analog NBFM with CTCSS/DCS) are pure Rust like the
+  rest of the DSP: nothing extra to install, the same `trunkd.exe` and SoapySDR runtime record them.
+  A tuner carrying only channels never logs `control channel acquired`; look for its calls on the
+  panel's channels table and in the `calls.conventional_*` metrics instead. Wide-coverage radios such as the SDRplay RSPdx
+  suit VHF/UHF channel work: they need the SDRplay API service and the SDRplay Soapy module (both in
+  section 2), and their IF filter steps are often narrower than the sample rate, so keep channels
+  inside the filter ([sdr-hardware.md](sdr-hardware.md#tuners-for-conventional-channels)).
 * **Clock.** Windows' default time settings poll far too rarely for recording; see
   [windows-service.md](windows-service.md#host-clock-and-ntp).

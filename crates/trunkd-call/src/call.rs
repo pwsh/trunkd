@@ -244,6 +244,108 @@ impl BroadcastifyOutcome {
     }
 }
 
+/// What a conventional (analog) channel adds to a call: the analog extras of
+/// the keyup upload contract.
+///
+/// Present only on calls recorded from a `[[channel]]`; a P25 call has `None`
+/// and its upload and sidecar carry none of these keys. Each optional member
+/// is omitted from the wire when unknown (e.g. a call closed by the orphan
+/// sweep never saw its end measurements).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConventionalInfo {
+    /// Demodulation mode, wire spelling (`nbfm`). Uploaded as `mode`.
+    pub mode: String,
+    /// Decoder name as sdrtrunk's ID3 tag carried it (`NBFM`). Uploaded as
+    /// `decoder`.
+    pub decoder: String,
+    /// The configured tone, canonical spelling (`167.9`, `D445N`), when the
+    /// channel is tone-gated. Uploaded as `tone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+    /// The tone heard for most of the call, if any. Uploaded as
+    /// `toneDetected`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tone_detected: Option<String>,
+    /// Why the call ended (`squelch_closed`, `tone_lost`, `max_duration`,
+    /// `shutdown`, `orphaned`). Uploaded as `squelchReason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub squelch_reason: Option<String>,
+    /// Power above the noise floor when the squelch opened, dB. Uploaded as
+    /// `snrDb`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snr_db: Option<f32>,
+    /// Largest instantaneous deviation seen during the call, Hz. Uploaded as
+    /// `peakDeviationHz`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_deviation_hz: Option<f32>,
+    /// Mean carrier offset from the channel centre while open, Hz. Uploaded as
+    /// `offsetHz`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_hz: Option<f32>,
+}
+
+impl ConventionalInfo {
+    /// An NBFM call's extras with nothing measured yet: `mode=nbfm`,
+    /// `decoder=NBFM`.
+    pub fn nbfm() -> Self {
+        ConventionalInfo {
+            mode: "nbfm".to_owned(),
+            decoder: "NBFM".to_owned(),
+            ..ConventionalInfo::default()
+        }
+    }
+
+    /// The extras as wire `(name, value)` pairs, in upload order. The one list
+    /// both the multipart body and the sidecar are written from, so the two
+    /// can never spell a key differently. Numbers carry one decimal.
+    pub fn wire_fields(&self) -> Vec<(&'static str, WireValue)> {
+        let mut out = vec![
+            ("mode", WireValue::Text(self.mode.clone())),
+            ("decoder", WireValue::Text(self.decoder.clone())),
+        ];
+        let text = |name, v: &Option<String>, out: &mut Vec<_>| {
+            if let Some(v) = v {
+                out.push((name, WireValue::Text(v.clone())));
+            }
+        };
+        let num = |name, v: Option<f32>, out: &mut Vec<_>| {
+            if let Some(v) = v.filter(|v| v.is_finite()) {
+                out.push((name, WireValue::Number(round1(v))));
+            }
+        };
+        text("tone", &self.tone, &mut out);
+        text("toneDetected", &self.tone_detected, &mut out);
+        text("squelchReason", &self.squelch_reason, &mut out);
+        num("snrDb", self.snr_db, &mut out);
+        num("peakDeviationHz", self.peak_deviation_hz, &mut out);
+        num("offsetHz", self.offset_hz, &mut out);
+        out
+    }
+}
+
+/// One value of [`ConventionalInfo::wire_fields`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum WireValue {
+    /// A string field.
+    Text(String),
+    /// A measurement, already rounded to one decimal.
+    Number(f64),
+}
+
+impl std::fmt::Display for WireValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireValue::Text(s) => f.write_str(s),
+            WireValue::Number(n) => write!(f, "{n:.1}"),
+        }
+    }
+}
+
+fn round1(v: f32) -> f64 {
+    (f64::from(v) * 10.0).round() / 10.0
+}
+
 /// A completed call: immutable, self-describing, ready to encode and upload.
 ///
 /// `pcm` is 8 kHz mono signed 16-bit audio and is **empty for encrypted
@@ -321,6 +423,11 @@ pub struct FinishedCall {
     /// thread: [`CallBuilder::finish`] always leaves it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcastify: Option<BroadcastifyOutcome>,
+    /// The analog extras, for a call recorded from a conventional channel;
+    /// `None` for every P25 call. Also what makes the sidecar say
+    /// `"audio_type": "analog"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conventional: Option<ConventionalInfo>,
     /// Seconds of audio loud enough to be speech, from [`speech_seconds`]:
     /// 20 ms frames whose RMS clears −40 dBFS, times 0.02.
     ///
@@ -466,6 +573,7 @@ pub struct CallBuilder {
     source_system: Option<u16>,
     nac: Option<u16>,
     quality: SourceQuality,
+    conventional: Option<ConventionalInfo>,
     pcm: Vec<i16>,
     max_samples: usize,
     truncated: bool,
@@ -519,6 +627,7 @@ impl CallBuilder {
             source_system: None,
             nac: None,
             quality: SourceQuality::default(),
+            conventional: None,
             pcm: Vec::new(),
             max_samples: duration_to_samples(Self::DEFAULT_MAX_DURATION),
             truncated: false,
@@ -549,7 +658,7 @@ impl CallBuilder {
         }
     }
 
-    /// Make room for `n` more samples (review 2026-09-22 §3.2).
+    /// Make room for `n` more samples.
     ///
     /// Left to `Vec`, a call's PCM starts at a few samples and doubles its way
     /// up — about ten reallocations and copies for a 10 s call, one per frame
@@ -750,6 +859,12 @@ impl CallBuilder {
         }
     }
 
+    /// Mark this a conventional-channel call and attach its analog extras
+    /// ([`FinishedCall::conventional`]).
+    pub fn set_conventional(&mut self, info: Option<ConventionalInfo>) {
+        self.conventional = info;
+    }
+
     /// Set the site NAC.
     pub fn set_nac(&mut self, nac: Option<u16>) {
         self.nac = nac;
@@ -806,6 +921,7 @@ impl CallBuilder {
             // Filled in later, on the uplink thread, and only when keyup has
             // turned the feature on: call assembly knows nothing about it.
             broadcastify: None,
+            conventional: self.conventional,
             speech_s,
             pcm,
         }
@@ -895,7 +1011,7 @@ mod tests {
 
     #[test]
     fn an_unnamed_talker_is_never_the_caller() {
-        // T-B7: a call opened from a grant update hears "radio 0" before the
+        // A call opened from a grant update hears "radio 0" before the
         // link control names the talker. That is "unknown", not a radio.
         let mut b = builder();
         b.talker(0, 1_788_012_000_123, false, Some("early alias".into()));
@@ -992,7 +1108,7 @@ mod tests {
         assert_eq!(b.pcm.capacity(), 8000, "nothing reserved past the cap");
     }
 
-    /// Review 2026-09-22 §3.2: the first frame reserves a typical call's worth
+    /// The first frame reserves a typical call's worth
     /// of audio, growth after that doubles, and the buffer never reserves past
     /// the cap (it used to overshoot a 30-minute cap to ~33 MB).
     #[test]

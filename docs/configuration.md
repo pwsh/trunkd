@@ -27,7 +27,10 @@ prefix and `__` for nesting: `TRUNKD_UPLINK__API_KEY=…`, `TRUNKD_UPLINK__SPOOL
 working directory; the Windows service sets that to the config file's directory.
 
 **Starting from an sdrtrunk playlist.** `trunkd import-sdrtrunk <playlist.xml>` prints a
-`trunkd.toml` equivalent of an sdrtrunk playlist's P25 systems to stdout, as a starting point.
+`trunkd.toml` equivalent of an sdrtrunk playlist's P25 systems and NBFM channels to stdout, as a
+starting point. It synthesizes placeholder tuners (one per site, plus one per group of channels no
+site tuner can hear) that you then point at real hardware; see [`[[channel]]`](#channel--one-conventional-analog-channel).
+A 25 kHz (wideband) NBFM channel is imported disabled, since trunkd does not record those yet.
 
 **Validating.** `trunkd --config trunkd.toml check` parses and validates the file, prints the
 result and the SDRs it can see, and exits without opening any of them.
@@ -172,6 +175,78 @@ knobs:
 Where to get the control frequencies: RadioReference's page for your system lists every site's
 control channels, and an sdrtrunk playlist carries them too (`trunkd import-sdrtrunk`). Keyup can
 also replace a tuner's primary-site candidates at runtime.
+
+## `[[channel]]` — one conventional analog channel
+
+An analog NBFM frequency — a fire dispatch, a school-bus channel — recorded call by call. The
+channel is cut out of a tuner's capture by the same channelizer the sites use, so a tuner can
+carry a P25 site and channels at once, or channels alone (a config with channels and no
+`[[site]]` is valid). Each call is uploaded as a **group call** under (`system`, `talkgroup`)
+with `name` as the talkgroup label.
+
+```toml
+[[device]]
+id               = "vhf0"
+backend          = "soapy"
+driver           = "sdrplay"
+sample_rate      = 2000000
+center_frequency = 155000000       # usable 154.0125–155.9875 MHz
+
+[[channel]]
+name      = "Fire Dispatch"
+system    = "Example County Fire"
+frequency = 154250000
+talkgroup = 14
+tone      = "167.9"
+```
+
+| key | default | meaning |
+| --- | --- | --- |
+| `name` | — | Required. Sent as the call's `talkgroupLabel`. |
+| `system` | `[uplink] system_label` | System label the calls are filed under. |
+| `site` | `[uplink] site_label`, then the device id | Site label recorded on the calls. |
+| `device` | auto | The `[[device]]` that carries the channel. Unset picks the one device whose usable span covers `frequency`; none or several is a startup error that asks you to set it. |
+| `frequency` | — | Required. Channel centre, Hz. |
+| `mode` | `"nbfm"` | `"am"` is accepted but not recorded: it is skipped with a warning. |
+| `enabled` | `true` | A disabled channel stays in the file and is not checked or started. |
+| `bandwidth_hz` | `12500` | `12500` (±2.5 kHz deviation), the only value supported today. 25 kHz (wideband) channels are not supported yet: `25000` is refused at startup. |
+| `talkgroup` | `frequency / 1000` | Talkgroup id the calls carry (154.250 MHz → `154250`). Keep the number an existing archive already uses for the channel. `[recorder] skip_talkgroups` never applies to conventional channels. |
+| `tone` | unset | The sub-audible tone a call must carry to be recorded. CTCSS as a frequency from the standard 50-tone table (`"167.9"`, also `"PL 167.9"`); DCS as `"D445N"`, `"D445I"` (inverted), `"445"` or `"DCS 445"`. A bare TOML number works too. Unset is **carrier squelch**: any carrier opens the channel, and a tone heard is still reported on the call. |
+| `dcs_strict` | `false` | DCS only: accept only error-free code words instead of correcting one bit. |
+| `deemphasis_us` | `750` | De-emphasis time constant, µs. `0` disables it. |
+
+`[channel.squelch]` (all optional; TOML needs it after the channel's other keys):
+
+| key | default | meaning |
+| --- | --- | --- |
+| `open_db` | `8.0` | Open when channel power is this many dB above the tracked noise floor. Must be greater than `close_db`. |
+| `close_db` | `5.0` | Close when power falls to or below this many dB above the floor. |
+| `attack_ms` | `40` | How long power must stay above `open_db` before the channel opens. |
+| `hang_ms` | `1000` | How long power must stay below `close_db` before the call ends; a re-key inside it continues the call. |
+| `tone_timeout_ms` | `750` | With a `tone`: how long after carrier-up the tone must be confirmed. A carrier without it is discarded and counted as a tone mismatch. |
+| `max_call_s` | `180` | Longer transmissions are split into consecutive calls, no audio lost. |
+| `min_call_ms` | `500` | Shorter calls (kerchunks) are dropped and counted. Must be shorter than `max_call_s`. |
+
+sdrtrunk's `noise_open`, `noise_close`, `hysteresis_open` and `hysteresis_close` (which
+`trunkd import-sdrtrunk` copies across) are accepted and ignored, with one info line at start:
+they are dimensionless sdrtrunk counts with no meaning to trunkd's dB squelch.
+
+**What is checked at start** (each is a startup error naming the channel; only enabled NBFM
+channels are checked):
+
+* the device exists (or exactly one covers the frequency), has a `center_frequency`, and a
+  sample rate the channelizer can drive (a multiple of 12.5 kHz giving an even bin count);
+* the frequency is inside the device's usable span, `center_frequency ± (sample_rate/2 − one
+  bin)`, and is **not on the capture centre**: the centre (DC) bin is refused, so put the tuner's
+  `center_frequency` at least 25 kHz away from every channel;
+* no two channels on one device closer than 6.25 kHz;
+* no channel closer than 12.5 kHz to a control candidate of an enabled site on the same device
+  ("a conventional channel cannot share a P25 control channel");
+* `tone` parses, `bandwidth_hz` is 12500, `open_db` > `close_db`;
+* (`system`, `talkgroup`) is unique across channels — two channels filed as the same talkgroup
+  would be indistinguishable upstream.
+
+A channel inside the capture's outer 1 % (the tuner's own filter skirt) only gets a warning.
 
 ## `[recorder]` — what stays on the box
 

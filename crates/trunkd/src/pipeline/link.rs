@@ -472,7 +472,7 @@ impl LinkHandle {
         stop: Arc<AtomicBool>,
     ) {
         // Blocks until a message arrives and wakes only to look at `stop`; a
-        // 2 ms poll was ~500 wakeups a second (review 2026-09-22 §3.4).
+        // 2 ms poll was ~500 wakeups a second.
         while !stop.load(Ordering::Relaxed) {
             match rx.recv_wait(Duration::from_millis(100)) {
                 Ok((from, msg)) => self.ingest(from, msg, coord.as_deref()),
@@ -1833,7 +1833,7 @@ mod tests {
 
     #[test]
     fn a_peers_grant_too_old_to_follow_is_counted_and_not_routed() {
-        // C4: a grant that is authentic but old (delayed, or captured and
+        // A grant that is authentic but old (delayed, or captured and
         // resent inside the frame window) would send a tuner to a frequency
         // whose call is long over.
         let metrics = Metrics::new();

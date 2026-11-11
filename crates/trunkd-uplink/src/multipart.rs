@@ -48,6 +48,9 @@ use trunkd_call::{AudioFormat, CallKind, FinishedCall};
 /// | `recorder` | `trunkd` |
 /// | `site` | site label |
 /// | `nac`, `algorithm`, `keyId` | when known |
+/// | `mode`, `decoder` | `nbfm`, `NBFM` — conventional-channel calls only |
+/// | `tone`, `toneDetected`, `squelchReason` | configured tone, tone heard, end reason — conventional only, when known |
+/// | `snrDb`, `peakDeviationHz`, `offsetHz` | squelch-open SNR and call measurements, one decimal — conventional only, when known |
 /// | `sourceQuality` | JSON `{"instance":…,"voice_frames":…,"bad_frames":…,"rssi_dbfs":…}`, when this recorder has something to say |
 /// | `broadcastifyOutcome` | `uploaded` \| `duplicate` \| `failed` \| `late` \| `claim_denied` \| `skipped` — only when direct-to-Broadcastify decided something |
 /// | `broadcastifyCode` | the stage-1 response code, when one was parsed |
@@ -183,6 +186,14 @@ pub fn build_multipart_with_priority(
     }
     if let Some(key_id) = call.key_id {
         field("keyId", &key_id.to_string());
+    }
+    // A conventional (analog) channel's call: what it was demodulated as, its
+    // tone, why its squelch closed and how strong it was. Keyup keeps them in
+    // `raw_meta`. Never present on a P25 call, whose body is unchanged.
+    if let Some(info) = &call.conventional {
+        for (name, value) in info.wire_fields() {
+            field(name, &value.to_string());
+        }
     }
     // Which recorder heard this, and how well (see `SourceQuality`). Additive
     // and optional in both directions: a receiver that does not know the field
@@ -702,5 +713,254 @@ mod tests {
         // matters is that names and filenames stay quotable.
         assert_eq!(get(&fields, "talkgroupLabel"), Some("bad\"\r\nname"));
         assert_eq!(escape("bad\"\r\nname"), "bad'name");
+    }
+
+    /// A digital call with every optional field this module can emit, for the
+    /// golden test below.
+    fn rich_digital_call() -> FinishedCall {
+        let mut b = CallBuilder::new(
+            "Example Network",
+            "Site 1",
+            1_788_012_000_123,
+            851_012_500,
+            52101,
+        );
+        b.set_talkgroup_label(Some("PD DISPATCH".into()));
+        b.set_patches(vec![19282, 50051]);
+        b.set_nac(Some(659));
+        b.set_algorithm(Some("UNENCRYPTED".into()), Some(7));
+        b.set_source_suid(Some(0xBEE00), Some(0x101));
+        b.set_talker_alias(Some("ENGINE 3".into()));
+        b.set_instance(Some("rec-test-01".into()));
+        b.set_rssi_dbfs(Some(-31.5));
+        b.talker(9_000_011, 1_788_012_000_123, true, Some("UNIT_313".into()));
+        b.push_voice_frame(&[1000i16; 160], false);
+        b.push_voice_frame(&[0i16; 160], true);
+        b.frequency(851_037_500, 1_788_012_000_323);
+        b.finish(1_788_012_001_123)
+    }
+
+    /// The whole body with the boundary normalised and CRLF shown as LF.
+    fn normalised(ct: &str, body: &[u8]) -> String {
+        let boundary = ct.split("boundary=").nth(1).expect("boundary");
+        String::from_utf8_lossy(body)
+            .replace(boundary, "BOUNDARY")
+            .replace("\r\n", "\n")
+    }
+
+    /// A digital (P25) upload is byte-for-byte what it was before conventional
+    /// channels existed: same fields, same order, same spelling, no analog
+    /// extras. Golden captured from the pre-NBFM build.
+    #[test]
+    fn a_digital_upload_is_byte_identical_to_the_golden_body() {
+        let (ct, body) = build_multipart(
+            &rich_digital_call(),
+            "kup_test",
+            7,
+            Some(b"AUDIOBYTES"),
+            AudioFormat::default(),
+        );
+        let got = normalised(&ct, &body);
+        assert_eq!(got, DIGITAL_GOLDEN);
+    }
+
+    const DIGITAL_GOLDEN: &str = r##"--BOUNDARY
+Content-Disposition: form-data; name="key"
+
+kup_test
+--BOUNDARY
+Content-Disposition: form-data; name="system"
+
+7
+--BOUNDARY
+Content-Disposition: form-data; name="systemLabel"
+
+Example Network
+--BOUNDARY
+Content-Disposition: form-data; name="dateTime"
+
+1788012000
+--BOUNDARY
+Content-Disposition: form-data; name="startMs"
+
+1788012000123
+--BOUNDARY
+Content-Disposition: form-data; name="endMs"
+
+1788012001123
+--BOUNDARY
+Content-Disposition: form-data; name="talkgroup"
+
+52101
+--BOUNDARY
+Content-Disposition: form-data; name="talkgroupLabel"
+
+PD DISPATCH
+--BOUNDARY
+Content-Disposition: form-data; name="frequency"
+
+851012500
+--BOUNDARY
+Content-Disposition: form-data; name="source"
+
+9000011
+--BOUNDARY
+Content-Disposition: form-data; name="sources"
+
+[{"emergency":true,"pos":0.0,"src":9000011,"tag":"UNIT_313"}]
+--BOUNDARY
+Content-Disposition: form-data; name="frequencies"
+
+[{"error_count":0,"freq":851012500,"len":0.04,"pos":0.0,"spike_count":0},{"error_count":0,"freq":851037500,"len":0.96,"pos":0.04,"spike_count":0}]
+--BOUNDARY
+Content-Disposition: form-data; name="patches"
+
+[19282,50051]
+--BOUNDARY
+Content-Disposition: form-data; name="emergency"
+
+1
+--BOUNDARY
+Content-Disposition: form-data; name="encrypted"
+
+0
+--BOUNDARY
+Content-Disposition: form-data; name="talkerAlias"
+
+ENGINE 3
+--BOUNDARY
+Content-Disposition: form-data; name="sourceWacn"
+
+781824
+--BOUNDARY
+Content-Disposition: form-data; name="sourceSystem"
+
+257
+--BOUNDARY
+Content-Disposition: form-data; name="audioName"
+
+Example-Network_52101_1788012000123.mp3
+--BOUNDARY
+Content-Disposition: form-data; name="audioType"
+
+audio/mpeg
+--BOUNDARY
+Content-Disposition: form-data; name="recorder"
+
+trunkd
+--BOUNDARY
+Content-Disposition: form-data; name="priority"
+
+live
+--BOUNDARY
+Content-Disposition: form-data; name="site"
+
+Site 1
+--BOUNDARY
+Content-Disposition: form-data; name="nac"
+
+659
+--BOUNDARY
+Content-Disposition: form-data; name="algorithm"
+
+UNENCRYPTED
+--BOUNDARY
+Content-Disposition: form-data; name="keyId"
+
+7
+--BOUNDARY
+Content-Disposition: form-data; name="sourceQuality"
+
+{"instance":"rec-test-01","voice_frames":2,"bad_frames":1,"rssi_dbfs":-31.5}
+--BOUNDARY
+Content-Disposition: form-data; name="speechS"
+
+0.02
+--BOUNDARY
+Content-Disposition: form-data; name="durationMs"
+
+1000
+--BOUNDARY
+Content-Disposition: form-data; name="audio"; filename="Example-Network_52101_1788012000123.mp3"
+Content-Type: audio/mpeg
+
+AUDIOBYTES
+--BOUNDARY--
+"##;
+
+    /// A conventional call per the keyup upload contract: filed under its channel's system, site,
+    /// talkgroup and name, with one frequency segment, no radios, and the
+    /// analog extras.
+    #[test]
+    fn a_conventional_call_sends_the_analog_contract() {
+        let mut b = CallBuilder::new(
+            "Example County Fire",
+            "Example Hill",
+            1_788_012_000_000,
+            154_250_000,
+            154_250,
+        );
+        b.set_talkgroup_label(Some("Fire Dispatch".into()));
+        b.set_conventional(Some(trunkd_call::ConventionalInfo {
+            tone: Some("D445N".into()),
+            tone_detected: Some("D445N".into()),
+            squelch_reason: Some("tone_lost".into()),
+            snr_db: Some(12.04),
+            peak_deviation_hz: Some(2_200.0),
+            offset_hz: Some(35.5),
+            ..trunkd_call::ConventionalInfo::nbfm()
+        }));
+        b.push_pcm(&[1000i16; 8000]);
+        let call = b.finish(1_788_012_001_000);
+        let (ct, body) =
+            build_multipart(&call, "kup_test", 7, Some(b"MP3"), AudioFormat::default());
+        let (fields, _) = parse(&ct, &body);
+        assert_eq!(get(&fields, "systemLabel"), Some("Example County Fire"));
+        assert_eq!(get(&fields, "site"), Some("Example Hill"));
+        assert_eq!(get(&fields, "talkgroup"), Some("154250"));
+        assert_eq!(get(&fields, "talkgroupLabel"), Some("Fire Dispatch"));
+        assert_eq!(get(&fields, "frequency"), Some("154250000"));
+        assert_eq!(get(&fields, "sources"), Some("[]"));
+        assert!(get(&fields, "source").is_none(), "no radio ids in analog");
+        let freqs: serde_json::Value =
+            serde_json::from_str(get(&fields, "frequencies").expect("frequencies")).expect("json");
+        assert_eq!(freqs.as_array().map(Vec::len), Some(1));
+        assert_eq!(freqs[0]["freq"], 154_250_000u64);
+        assert_eq!(get(&fields, "mode"), Some("nbfm"));
+        assert_eq!(get(&fields, "decoder"), Some("NBFM"));
+        assert_eq!(get(&fields, "tone"), Some("D445N"));
+        assert_eq!(get(&fields, "toneDetected"), Some("D445N"));
+        assert_eq!(get(&fields, "squelchReason"), Some("tone_lost"));
+        assert_eq!(get(&fields, "snrDb"), Some("12.0"));
+        assert_eq!(get(&fields, "peakDeviationHz"), Some("2200.0"));
+        assert_eq!(get(&fields, "offsetHz"), Some("35.5"));
+        assert_eq!(get(&fields, "recorder"), Some("trunkd"));
+        assert_eq!(
+            get(&fields, "audioName"),
+            Some("Example-County-Fire_154250_1788012000000.mp3")
+        );
+        assert!(get(&fields, "call_kind").is_none(), "a group call");
+    }
+
+    /// Carrier squelch with nothing heard: the optional extras are absent,
+    /// not sent empty.
+    #[test]
+    fn unknown_analog_extras_are_omitted() {
+        let mut b = CallBuilder::new("S", "T", 1_000, 154_250_000, 1);
+        b.set_conventional(Some(trunkd_call::ConventionalInfo::nbfm()));
+        b.push_pcm(&[1000i16; 160]);
+        let (ct, body) = build_multipart(&b.finish(2_000), "k", 7, None, AudioFormat::default());
+        let (fields, _) = parse(&ct, &body);
+        assert_eq!(get(&fields, "mode"), Some("nbfm"));
+        for absent in [
+            "tone",
+            "toneDetected",
+            "squelchReason",
+            "snrDb",
+            "peakDeviationHz",
+            "offsetHz",
+        ] {
+            assert!(get(&fields, absent).is_none(), "{absent}");
+        }
     }
 }

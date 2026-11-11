@@ -3,7 +3,8 @@
 trunkd is a P25 Phase 1 trunked-radio recorder written in Rust. It takes a
 wideband capture from one or more SDRs, follows a site's control channel,
 records every voice call it is granted, decodes the IMBE voice, and uploads
-each finished call as an MP3 to a server. It runs unattended as a systemd
+each finished call as an MP3 to a server. It also records analog NBFM
+conventional channels from the same capture. It runs unattended as a systemd
 unit on Linux or as a Windows service, as one binary with no runtime to
 install.
 
@@ -19,6 +20,10 @@ trunkd's.
 
 - P25 Phase 1 control and traffic channels, C4FM and LSM (CQPSK simulcast).
 - IMBE voice. Encrypted calls are recorded as metadata only and never decoded.
+- Analog NBFM conventional channels, cut from the same capture as the P25
+  sites (or from a tuner of their own), with CTCSS or DCS tone squelch or plain
+  carrier squelch. Each transmission uploads as a group call under the
+  channel's system and talkgroup.
 - Several sites and several tuners per recorder. A polyphase channelizer cuts
   each capture into 12.5 kHz channels, so one tuner covers every channel of a
   site that fits in its bandwidth.
@@ -26,7 +31,7 @@ trunkd's.
 - A local web panel for status, tuner restarts, live audio and device setup.
 - An authenticated UDP link that lets two recorders share a site.
 
-Not built yet: P25 Phase 2 (TDMA), AMBE, analog conventional channels.
+Not built yet: P25 Phase 2 (TDMA), AMBE, AM channels, DMR, NXDN.
 
 ## Hardware
 
@@ -129,4 +134,4 @@ JTransforms; their notices, and the note on the expired IMBE patents, are in
 You are responsible for knowing whether receiving, recording or publishing
 radio traffic is legal where you are.
 
-<sub>Source revision: `00c087c64b89`</sub>
+<sub>Source revision: `2bfc1c89914e`</sub>

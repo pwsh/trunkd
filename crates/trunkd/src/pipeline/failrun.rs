@@ -4,10 +4,9 @@
 //! The control and observation loops talk to Keyup on fixed cadences (the
 //! desired-state GET every 10 s, tuner status every 15 s, observations and
 //! radio events per site). While Keyup is down each attempt used to warn:
-//! ~14 000 lines a day from the first two alone, burying everything else
-//! (review 2026-09-22 §3.5). A [`FailureRun`] logs the first failure of a
-//! run, then a reminder at most every [`FailureRun::REPEAT`] carrying the
-//! count, and one line when the request works again.
+//! ~14 000 lines a day from the first two alone, burying everything else.
+//! A [`FailureRun`] logs the first failure of a run, then a reminder at most
+//! every [`FailureRun::REPEAT`] carrying the count, and one line when the request works again.
 
 use std::time::{Duration, Instant};
 

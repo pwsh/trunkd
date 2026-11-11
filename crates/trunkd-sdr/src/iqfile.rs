@@ -75,10 +75,51 @@ pub enum Pacing {
 /// or end of file once its consumer has drained the ring), so a finished or
 /// restarted tuner never holds the others up.
 ///
+/// Readers start one after another (in the recorder, each device thread joins
+/// when it opens its tuner, after building its engines), so the group must be
+/// told up front whom to wait for: [`expect`](Lockstep::expect) reserves a
+/// place for a member that has not joined yet, and a reserved place counts as
+/// a peer whose consumer is still at 0. A reader that joins early therefore
+/// writes one window and waits rather than running free through its file.
+/// A reservation ends when its member joins, when it is
+/// [withdrawn](Lockstep::withdraw) (the member failed to open, is disabled, or
+/// will not replay unthrottled), or at the [join
+/// deadline](Lockstep::set_join_deadline) counted from the first join, after
+/// which the absent members are dropped with a warning and the rest go on
+/// without them. A group with no reservations behaves as before.
+///
 /// Live tuners have no use for it and real-time playback ignores it.
 #[derive(Debug, Default)]
 pub struct Lockstep {
-    members: Mutex<Vec<Arc<AtomicU64>>>,
+    state: Mutex<LockstepState>,
+}
+
+/// How long members that have joined wait for reserved members that have not,
+/// counted from the first join. Generous next to the time a device thread
+/// takes from spawn to open; a reservation nobody withdraws (a code path this
+/// misses) costs at most this much replay time, never samples.
+pub const DEFAULT_JOIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug)]
+struct LockstepState {
+    /// Consumer positions of the members that have joined.
+    members: Vec<Arc<AtomicU64>>,
+    /// Names reserved with [`Lockstep::expect`] that have not joined yet.
+    expected: Vec<String>,
+    /// When the first member joined: the join deadline counts from here.
+    first_join: Option<Instant>,
+    join_deadline: std::time::Duration,
+}
+
+impl Default for LockstepState {
+    fn default() -> Self {
+        LockstepState {
+            members: Vec::new(),
+            expected: Vec::new(),
+            first_join: None,
+            join_deadline: DEFAULT_JOIN_DEADLINE,
+        }
+    }
 }
 
 impl Lockstep {
@@ -87,10 +128,53 @@ impl Lockstep {
         Arc::new(Lockstep::default())
     }
 
-    /// Join the group at stream position 0.
-    fn join(self: &Arc<Self>) -> LockstepMember {
+    /// Reserve a place for `member`, which will join later under that name
+    /// (see [`IqFileTuner::with_lockstep`]). Until it joins, is withdrawn, or
+    /// the join deadline passes, every member that has joined is held within
+    /// one window of stream position 0. Reserving a name twice is one
+    /// reservation.
+    pub fn expect(&self, member: impl Into<String>) {
+        let member = member.into();
+        let mut state = self.lock();
+        if !state.expected.contains(&member) {
+            state.expected.push(member);
+        }
+    }
+
+    /// Give up a reservation: `member` will not join (it failed to open, is
+    /// disabled, or is not replaying unthrottled). A no-op for a name that is
+    /// not reserved, including one that has already joined.
+    pub fn withdraw(&self, member: &str) {
+        let mut state = self.lock();
+        let before = state.expected.len();
+        state.expected.retain(|m| m != member);
+        if state.expected.len() != before {
+            tracing::debug!(member, "replay clock: reservation withdrawn");
+        }
+    }
+
+    /// How long joined members wait for reserved ones, counted from the first
+    /// join (default [`DEFAULT_JOIN_DEADLINE`]).
+    pub fn set_join_deadline(&self, deadline: std::time::Duration) {
+        self.lock().join_deadline = deadline;
+    }
+
+    /// Names reserved that have not joined (or been dropped) yet.
+    pub fn pending(&self) -> Vec<String> {
+        self.lock().expected.clone()
+    }
+
+    /// Join the group at stream position 0, taking `member`'s reservation if
+    /// there is one.
+    fn join(self: &Arc<Self>, member: Option<&str>) -> LockstepMember {
         let position = Arc::new(AtomicU64::new(0));
-        self.lock().push(position.clone());
+        let mut state = self.lock();
+        state.members.push(position.clone());
+        if let Some(name) = member {
+            state.expected.retain(|m| m != name);
+        }
+        state.first_join.get_or_insert_with(Instant::now);
+        drop(state);
         LockstepMember {
             group: self.clone(),
             position,
@@ -98,8 +182,8 @@ impl Lockstep {
     }
 
     /// Poison is ignored: a reader that panicked must not wedge the others.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Arc<AtomicU64>>> {
-        self.members.lock().unwrap_or_else(|p| p.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, LockstepState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -118,10 +202,29 @@ struct LockstepMember {
 }
 
 impl LockstepMember {
-    /// Where the slowest *other* member's consumer is, or `None` alone.
+    /// Where the slowest *other* member's consumer is, or `None` alone. A
+    /// reserved member that has not joined counts as a peer at 0 until the
+    /// join deadline, when the group drops every such reservation.
     fn slowest_peer(&self) -> Option<u64> {
-        self.group
-            .lock()
+        let mut state = self.group.lock();
+        if !state.expected.is_empty()
+            && state
+                .first_join
+                .is_some_and(|t| t.elapsed() >= state.join_deadline)
+        {
+            tracing::warn!(
+                missing = %state.expected.join(", "),
+                deadline_ms = state.join_deadline.as_millis() as u64,
+                "replay clock: expected iqfile tuners did not start in time; \
+                 replaying without them (a late start is not kept in step)"
+            );
+            state.expected.clear();
+        }
+        if !state.expected.is_empty() {
+            return Some(0);
+        }
+        state
+            .members
             .iter()
             .filter(|p| !Arc::ptr_eq(p, &self.position))
             .map(|p| p.load(Ordering::Acquire))
@@ -177,6 +280,7 @@ impl Drop for LockstepMember {
     fn drop(&mut self) {
         self.group
             .lock()
+            .members
             .retain(|p| !Arc::ptr_eq(p, &self.position));
     }
 }
@@ -189,7 +293,8 @@ pub struct IqFileTuner {
     format: IqFormat,
     pacing: Pacing,
     batch_size: usize,
-    lockstep: Option<Arc<Lockstep>>,
+    /// The group this reader keeps step with, and the name it joins under.
+    lockstep: Option<(Arc<Lockstep>, String)>,
 }
 
 impl IqFileTuner {
@@ -229,9 +334,11 @@ impl IqFileTuner {
     }
 
     /// Keep this reader in step with the other members of `group` (see
-    /// [`Lockstep`]). Only unthrottled playback honours it.
-    pub fn with_lockstep(mut self, group: Arc<Lockstep>) -> Self {
-        self.lockstep = Some(group);
+    /// [`Lockstep`]), joining under `member`: the name its place was reserved
+    /// under with [`Lockstep::expect`], if it was. Only unthrottled playback
+    /// honours it; a real-time reader withdraws its reservation at start.
+    pub fn with_lockstep(mut self, group: Arc<Lockstep>, member: impl Into<String>) -> Self {
+        self.lockstep = Some((group, member.into()));
         self
     }
 
@@ -279,11 +386,17 @@ impl TunerDevice for IqFileTuner {
         let sample_rate = self.config.sample_rate;
         let batch_size = self.batch_size;
         let label = self.descriptor.label.clone();
-        // Joined here, before the reader thread exists, so every member of a
-        // group started together is counted from its first batch.
+        // Joined here, before the reader thread exists, so this reader is
+        // counted from its first batch. It is bounded by the members that have
+        // joined and by those reserved but not yet joined (see `Lockstep`), so
+        // members started one after another still begin together.
         let member = match (&self.lockstep, pacing) {
-            (Some(group), Pacing::Unthrottled) => Some(group.join()),
-            _ => None,
+            (Some((group, name)), Pacing::Unthrottled) => Some(group.join(Some(name))),
+            (Some((group, name)), Pacing::RealTime) => {
+                group.withdraw(name);
+                None
+            }
+            (None, _) => None,
         };
         let window = lockstep_window(sample_rate, batch_size);
 
@@ -665,13 +778,13 @@ mod tests {
         let group = Lockstep::new();
         let window = lockstep_window(SampleRate(sr), batch);
         let metrics = Metrics::new();
-        let start = |g: &Arc<Lockstep>| {
+        let start = |g: &Arc<Lockstep>, name: &str| {
             let cfg = TunerConfig::new(Hz::mhz(100), SampleRate(sr));
             Box::new(
                 IqFileTuner::open(&path, IqFormat::Sc8, cfg, Pacing::Unthrottled)
                     .expect("open")
                     .with_batch_size(batch)
-                    .with_lockstep(g.clone()),
+                    .with_lockstep(g.clone(), name),
             )
             .start(
                 StreamConfig {
@@ -682,8 +795,12 @@ mod tests {
             )
             .expect("start")
         };
-        let fast = start(&group);
-        let slow = start(&group);
+        // Both reserved up front, as the recorder does, so the first reader
+        // waits for the second instead of running ahead while it starts.
+        group.expect("fast");
+        group.expect("slow");
+        let fast = start(&group, "fast");
+        let slow = start(&group, "slow");
 
         // The slow consumer publishes what it has popped, in chunks, so what
         // the fast side reads is never ahead of the ring's true position.
@@ -744,10 +861,236 @@ mod tests {
             "the fast consumer led by {worst_lead} samples, more than {bound}"
         );
         assert!(
-            Lockstep::lock(&group).is_empty(),
+            group.lock().members.is_empty(),
             "finished readers leave the group"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Start an unthrottled reader of `path` in `group` under `name`, with a
+    /// ring that holds the whole file: nothing but the group holds it back,
+    /// and as nothing is consumed, what is in its ring is what the group let
+    /// through.
+    fn start_member(
+        path: &Path,
+        group: &Arc<Lockstep>,
+        name: &str,
+        metrics: &Metrics,
+        n: usize,
+    ) -> TunerStream {
+        let cfg = TunerConfig::new(Hz::mhz(100), SampleRate(48_000));
+        Box::new(
+            IqFileTuner::open(path, IqFormat::Sc8, cfg, Pacing::Unthrottled)
+                .expect("open")
+                .with_batch_size(1024)
+                .with_lockstep(group.clone(), name),
+        )
+        .start(
+            StreamConfig {
+                ring_capacity: n * 2, // room for the whole file: only the group holds it back
+                event_capacity: 8,
+            },
+            metrics,
+        )
+        .expect("start")
+    }
+
+    /// Wait (bounded) until `stream` holds `n` samples; returns what it holds.
+    fn wait_for_slots(stream: &TunerStream, n: usize, within: std::time::Duration) -> usize {
+        let t0 = Instant::now();
+        while stream.consumer.slots() < n && t0.elapsed() < within {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        stream.consumer.slots()
+    }
+
+    /// The replay-lockstep defect this pins: each device thread joins at its own start, so
+    /// a member started while its peer was still being set up found the first
+    /// reader had already run free through the file. With both reserved up
+    /// front, the early reader writes one window and waits for its peer.
+    #[test]
+    fn a_member_that_starts_late_is_not_left_behind() {
+        let dir = std::env::temp_dir().join(format!("trunkd-iqlate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let sr = 48_000u32;
+        let n = 1 << 16;
+        let batch = 1024;
+        let path = write_tone(&dir, sr, sr as f32 / 8.0, n);
+        let group = Lockstep::new();
+        group.expect("early");
+        group.expect("late");
+        let window = lockstep_window(SampleRate(sr), batch);
+        let metrics = Metrics::new();
+        let early = start_member(&path, &group, "early", &metrics, n);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let before_peer = early.consumer.slots() as u64;
+        let late = start_member(&path, &group, "late", &metrics, n);
+        assert!(group.pending().is_empty(), "both reservations taken");
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let ahead = early.consumer.slots() as u64;
+        let late_ahead = late.consumer.slots() as u64;
+        drop((early, late));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            before_peer <= window,
+            "the early reader wrote {before_peer} samples before its peer had joined"
+        );
+        assert!(
+            ahead <= window && late_ahead <= window,
+            "readers wrote {ahead} and {late_ahead} samples before either peer consumed any"
+        );
+    }
+
+    /// A reserved member that never joins (and is never withdrawn) holds the
+    /// others for the join deadline only: then it is dropped and the rest
+    /// replay the whole file.
+    #[test]
+    fn a_reserved_member_that_never_starts_is_dropped_at_the_deadline() {
+        let dir = std::env::temp_dir().join(format!("trunkd-iqdeadline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let sr = 48_000u32;
+        let n = 1 << 16;
+        let path = write_tone(&dir, sr, sr as f32 / 8.0, n);
+        let group = Lockstep::new();
+        let deadline = std::time::Duration::from_millis(400);
+        group.set_join_deadline(deadline);
+        group.expect("present");
+        group.expect("absent");
+        let window = lockstep_window(SampleRate(sr), 1024);
+        let metrics = Metrics::new();
+        let t0 = Instant::now();
+        let present = start_member(&path, &group, "present", &metrics, n);
+
+        // Well inside the deadline it is still held at one window.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let held = present.consumer.slots() as u64;
+        let held_at = t0.elapsed();
+        assert_eq!(group.pending(), vec!["absent".to_owned()]);
+
+        // After it, the absent member is forgotten and the file flows.
+        let got = wait_for_slots(&present, n, std::time::Duration::from_secs(20));
+        let done_at = t0.elapsed();
+        drop(present);
+        let _ = std::fs::remove_dir_all(&dir);
+        if held_at < deadline {
+            assert!(held <= window, "wrote {held} samples inside the deadline");
+        }
+        assert_eq!(got, n, "the whole file once the deadline passed");
+        assert!(
+            done_at >= deadline,
+            "released after {done_at:?}, before the {deadline:?} deadline"
+        );
+        assert!(group.pending().is_empty(), "the absent member was dropped");
+    }
+
+    /// A member whose file cannot be opened withdraws its reservation, and the
+    /// member already running goes on at once rather than at the deadline.
+    #[test]
+    fn a_member_that_fails_to_open_releases_the_others() {
+        let dir = std::env::temp_dir().join(format!("trunkd-iqfail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let sr = 48_000u32;
+        let n = 1 << 16;
+        let path = write_tone(&dir, sr, sr as f32 / 8.0, n);
+        let group = Lockstep::new();
+        // Long enough that only the withdrawal can explain a prompt finish.
+        group.set_join_deadline(std::time::Duration::from_secs(60));
+        group.expect("good");
+        group.expect("broken");
+        let metrics = Metrics::new();
+        let good = start_member(&path, &group, "good", &metrics, n);
+
+        let cfg = TunerConfig::new(Hz::mhz(100), SampleRate(sr));
+        let opened = IqFileTuner::open(
+            dir.join("missing.c8"),
+            IqFormat::Sc8,
+            cfg,
+            Pacing::Unthrottled,
+        );
+        assert!(opened.is_err(), "the broken member's file is missing");
+        group.withdraw("broken");
+
+        let got = wait_for_slots(&good, n, std::time::Duration::from_secs(20));
+        drop(good);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, n, "the good member replayed the whole file");
+        assert!(group.pending().is_empty());
+    }
+
+    /// A member that opens but whose reader fails inside its thread (here a
+    /// file that is not WAV) has already joined; its thread ending is what
+    /// takes it out of the group, so it does not hold the others either.
+    #[test]
+    fn a_member_whose_reader_fails_leaves_the_group() {
+        let dir = std::env::temp_dir().join(format!("trunkd-iqbadwav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let sr = 48_000u32;
+        let n = 1 << 16;
+        let path = write_tone(&dir, sr, sr as f32 / 8.0, n);
+        let not_wav = dir.join("not.wav");
+        std::fs::write(&not_wav, b"definitely not RIFF").expect("write");
+        let group = Lockstep::new();
+        group.set_join_deadline(std::time::Duration::from_secs(60));
+        group.expect("good");
+        group.expect("bad");
+        let metrics = Metrics::new();
+        let good = start_member(&path, &group, "good", &metrics, n);
+        let cfg = TunerConfig::new(Hz::mhz(100), SampleRate(sr));
+        let bad = Box::new(
+            IqFileTuner::open(&not_wav, IqFormat::WavFloat, cfg, Pacing::Unthrottled)
+                .expect("the file exists, so open succeeds")
+                .with_lockstep(group.clone(), "bad"),
+        )
+        .start(
+            StreamConfig {
+                ring_capacity: 1024,
+                event_capacity: 8,
+            },
+            &metrics,
+        )
+        .expect("start");
+
+        let got = wait_for_slots(&good, n, std::time::Duration::from_secs(20));
+        drop((good, bad));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, n, "the good member replayed the whole file");
+    }
+
+    /// A reader reserved under a name but started with real-time pacing does
+    /// not take part, so it gives its reservation back at start.
+    #[test]
+    fn a_realtime_reader_withdraws_its_reservation() {
+        let dir = std::env::temp_dir().join(format!("trunkd-iqrt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = write_tone(&dir, 48_000, 6_000.0, 4096);
+        let group = Lockstep::new();
+        group.expect("rt");
+        let cfg = TunerConfig::new(Hz::mhz(100), SampleRate(48_000));
+        let stream = Box::new(
+            IqFileTuner::open(&path, IqFormat::Sc8, cfg, Pacing::RealTime)
+                .expect("open")
+                .with_lockstep(group.clone(), "rt"),
+        )
+        .start(
+            StreamConfig {
+                ring_capacity: 8192,
+                event_capacity: 8,
+            },
+            &Metrics::new(),
+        )
+        .expect("start");
+        assert!(group.pending().is_empty());
+        assert!(
+            group.lock().members.is_empty(),
+            "real-time readers never join"
+        );
+        drop(stream);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

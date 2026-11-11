@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "trunkd-analog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Analog NBFM conventional-channel receiver for trunkd: 25 ksps IQ in, squelched 8 kHz PCM calls with CTCSS/DCS tone gating out."
+
+[features]
+# Synthetic NBFM signal generator (modulator with CTCSS/DCS sub-audio, AWGN,
+# wideband channel placer) for this crate's tests and the trunkd end-to-end
+# test. Not used at run time.
+testsig = []
+
+[dependencies]
+# Filter design and the streaming complex FIR (`dsp::filters`).
+trunkd-p25.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The crate's own tests use the generator.
+trunkd-analog = { path = ".", features = ["testsig"] }

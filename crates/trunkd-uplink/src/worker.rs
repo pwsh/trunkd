@@ -35,8 +35,7 @@ use crate::UplinkConfig;
 /// The worker owes the spool a drain pass on a timer, so it cannot block on
 /// `recv` forever; it waits with a timeout instead, which still wakes the
 /// moment a call arrives. It used to nap 25 ms between polls (~40 wakeups a
-/// second while idle); the wait is now also cut short by the next drain
-/// (review 2026-09-22 §3.4, T-C3).
+/// second while idle); the wait is now also cut short by the next drain.
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
 /// Connect timeout, separate from (and never longer than) the whole-request
@@ -449,8 +448,7 @@ impl Worker {
                 // ended" line already records every call at info, the status
                 // line carries the upload counts, and a failure warns. The
                 // success lines (these two and Broadcastify's) were 18 % of the
-                // laptop's log text on 2026-09-18 (review 2026-09-22 §3.5,
-                // T-C3).
+                // laptop's log text on 2026-09-18.
                 tracing::debug!(
                     call = %call.audio_stem(),
                     talkgroup = call.talkgroup,

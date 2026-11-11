@@ -29,8 +29,7 @@ pub fn init(level: &str, log_dir: Option<&str>, file_name: &str) -> Option<Worke
 
     // Colour only on a terminal. Under systemd stderr is appended to a file
     // (or journald), where the escape codes were almost half of every byte
-    // written: 2026-09-18 logged 22.3 MB carrying 12.3 MB of text (review
-    // 2026-09-22 §3.5, T-C3).
+    // written: 2026-09-18 logged 22.3 MB carrying 12.3 MB of text.
     let console = fmt::layer()
         .with_target(false)
         .with_ansi(std::io::stderr().is_terminal())

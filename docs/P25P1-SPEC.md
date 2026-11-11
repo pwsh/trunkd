@@ -1452,7 +1452,7 @@ record:
   and a grant can subscribe the receiver mid-teardown, so an alias block arriving with no
   call open belongs to the talker that just stopped. Opening a call for it files one talker's
   alias under the next talker's call.
-- **The site engine files a block only under a confirmed talker** (`SiteEngine`, T-D4). The
+- **The site engine files a block only under a confirmed talker** (`SiteEngine`). The
   infrastructure keeps cycling the previous talker's blocks into the next transmission —
   before the new talker's first LCO 0 and, for up to a cycle, after it (observed: a field
   unit's `FD_301` / `A33` filed under the console that answered it). So: a block arriving

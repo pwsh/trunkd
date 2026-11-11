@@ -43,7 +43,7 @@
 //! plainly: **a call spanning a resync can be up to one correction long or
 //! short**, which is the right trade against every call after it being wrong.
 //!
-//! # Backlog is not loss (review 2026-09-22, R1 — T-B5)
+//! # Backlog is not loss
 //!
 //! The monitor used to be handed the wall estimate of the newest *consumed*
 //! sample. Under DSP overload that is wrong twice over: a full ring (1.68 s at
@@ -757,7 +757,7 @@ mod tests {
         );
     }
 
-    // -- StreamClock under a synthetic backlog (T-B5) -------------------------
+    // -- StreamClock under a synthetic backlog --------------------------------
 
     /// How the simulated DSP thread feeds its clock.
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -931,7 +931,7 @@ mod tests {
 
     #[test]
     fn the_old_clock_sawtooths_under_a_full_ring() {
-        // The synthetic backlog reproduces R1: a DSP thread at 80 % of real
+        // The synthetic backlog reproduces the overload: a DSP thread at 80 % of real
         // time with a full ring and 20 % of the stream dropped, measured the
         // old way, resyncs over and over and stamps swing by seconds.
         let run = Sim::overloaded(Mode::Old).run();

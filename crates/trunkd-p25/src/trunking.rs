@@ -470,8 +470,8 @@ impl TrunkingTracker {
     /// * A **different** plan for an identifier already known replaces it only
     ///   on the second byte-identical decode in a row. One CRC-passing corrupt
     ///   IDEN used to replace a real band until the next good one, and every
-    ///   grant in between resolved to a frequency the site never used (review
-    ///   2026-09-22, D4). A re-announcement of the plan in force clears the
+    ///   grant in between resolved to a frequency the site never used. A
+    ///   re-announcement of the plan in force clears the
     ///   candidate, so the two decodes must be uninterrupted.
     fn learn_band(&mut self, band: IdenBand) -> bool {
         if !crate::inventory::plausible_channel_grid(&band) {
@@ -559,9 +559,9 @@ impl TrunkingTracker {
         });
 
         // A Phase 2 (TDMA) channel: this decoder is Phase 1 only, so following
-        // it would spend a pool slot on a call that can only end as "no voice"
-        // (review 2026-09-22 §4 gap 2). Refuse it before it is tracked or
-        // allocated, and say so once per call.
+        // it would spend a pool slot on a call that can only end as "no voice".
+        // Refuse it before it is tracked or allocated, and say so once per
+        // call.
         if let Some(band) = self.bands.get(g.channel.band).filter(|b| b.tdma) {
             let timeslot = band.timeslot(g.channel.channel);
             self.refuse_tdma(&g, freq, timeslot, sink);
@@ -939,7 +939,7 @@ mod tests {
         851_000_000 + 12_500 * u64::from(ch)
     }
 
-    /// Review 2026-09-22, D4: one corrupt IDEN for a band in use used to move
+    /// One corrupt IDEN for a band in use used to move
     /// every grant on that band until the next good one.
     #[test]
     fn a_known_band_is_replaced_only_by_two_identical_decodes_in_a_row() {
@@ -1064,7 +1064,7 @@ mod tests {
 
     #[test]
     fn pending_ttl_does_not_outlive_the_staleness_horizon() {
-        // Regression (review T2): with a TTL longer than STALE_MS, one IDEN
+        // Regression: with a TTL longer than STALE_MS, one IDEN
         // replayed a backlog of long-dead grants as fresh CallStarts and drained
         // the channel pool. A grant older than STALE_MS must never be replayed.
         const { assert!(PENDING_GRANT_TTL_MS <= STALE_MS) };
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn unit_to_unit_and_telephone_keep_the_full_24_bit_target() {
-        // Review T1: `to as u16` truncated 24-bit addresses. A non-group call
+        // Regression: `to as u16` truncated 24-bit addresses. A non-group call
         // reports talkgroup 0 (as documented) and the full TO in `target`.
         let mut t = TrunkingTracker::new(853_000_000);
         let mut events = Vec::new();
@@ -1361,7 +1361,7 @@ mod tests {
 
     #[test]
     fn pool_exhausted_reported_once_per_call() {
-        // Review T4: control refreshes of the same unstartable call must not
+        // Control refreshes of the same unstartable call must not
         // re-emit PoolExhausted; a *new* call on that frequency must.
         let mut t = TrunkingTracker::new(851_050_000);
         let mut events = Vec::new();
@@ -1396,7 +1396,7 @@ mod tests {
 
     #[test]
     fn traffic_start_rejected_returns_the_channel_but_never_the_control_frequency() {
-        // Review T3: without the control-frequency guard this both un-protected
+        // Without the control-frequency guard this both un-protected
         // the control channel and inflated the pool to 21.
         let control = 851_050_000;
         let mut t = TrunkingTracker::new(control);
@@ -1530,7 +1530,7 @@ mod tests {
 
     #[test]
     fn control_side_continue_unfreezes_control_updates() {
-        // Review T9: the reference *replaces* the tracked event on a talker
+        // The reference *replaces* the tracked event on a talker
         // change, so the new call is control-driven again. Keeping
         // `started_by_traffic` froze `event_end_ms` and the tracker went stale
         // mid-call.
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn traffic_update_with_zero_from_extends_the_same_call() {
-        // Review T9(b): "sometimes GROUP_VOICE_CHANNEL_USER has a zero FROM" —
+        // "Sometimes GROUP_VOICE_CHANNEL_USER has a zero FROM" —
         // that is still the same call, and it must extend the event.
         let mut t = TrunkingTracker::new(853_000_000);
         let mut events = Vec::new();
@@ -1608,7 +1608,7 @@ mod tests {
 
     #[test]
     fn traffic_update_talker_change_reports_a_continuation() {
-        // Review T9(c): a genuine traffic-side talker change replaces the
+        // A genuine traffic-side talker change replaces the
         // tracked call instead of being silently dropped.
         let mut t = TrunkingTracker::new(853_000_000);
         let mut events = Vec::new();
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn traffic_update_on_a_stale_tracker_starts_a_new_call() {
-        // Review T9(a): a stale tracked event is never the same call.
+        // A stale tracked event is never the same call.
         let mut t = TrunkingTracker::new(853_000_000);
         let mut events = Vec::new();
         t.process(&TsbkMessage::IdenUpdate(band()), 0, &mut |e| events.push(e));
@@ -1732,7 +1732,7 @@ mod tests {
             .collect()
     }
 
-    /// Review 2026-09-22 §4 gap 2 (T-D1): a grant on a TDMA channel is seen
+    /// A grant on a TDMA channel is seen
     /// (the `Grant` still goes out) but never tracked, never allocated and
     /// never started, and it is reported once per call — per carrier *and*
     /// slot, so two calls sharing a carrier are two refusals, and a control

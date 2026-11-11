@@ -17,8 +17,14 @@
 //! ([`ChannelBank::process_block`](trunkd_p25::dsp::ChannelBank::process_block)) and then lets each engine read the
 //! channels it subscribed ([`SiteEngine::process_channels`]). Before this,
 //! each `[[site]]` built its own filterbank over the same samples, and four
-//! sites on one HackRF overran the thread (2026-09-16; review 2026-09-22
-//! §3.1 O1).
+//! sites on one HackRF overran the thread (2026-09-16).
+//!
+//! Conventional `[[channel]]`s on the device ride the same bank: each is one
+//! more subscription, drained after the site engines by a
+//! [`ConvEngine`](crate::pipeline::conventional::ConvEngine). A device that
+//! carries channels and no site builds the bank from its own rate and centre.
+//! With no channel configured nothing here changes: no engine, no
+//! subscription, and the per-block loop over them iterates an empty slice.
 //!
 //! What stays per site is everything that was: each engine hunts its own
 //! control candidates, follows its own grants within its own
@@ -61,6 +67,7 @@ use trunkd_supervisor::{RunError, Supervised, SupervisionContext};
 use crate::config::{resolve_band, Backend, Config, Device, DeviceRole, PacingName};
 use crate::pipeline::autoppm::{AutoPpm, AutoPpmInbox};
 use crate::pipeline::control::TunerControl;
+use crate::pipeline::conventional::{self, ChannelSpec, ConvEngine};
 use crate::pipeline::coordinator::{GrantMsg, TrafficCmd};
 use crate::pipeline::ppmmemory;
 use crate::pipeline::spectrum::{SpectrumHook, SpectrumTap};
@@ -114,8 +121,8 @@ const IDLE_REMINDER: Duration = Duration::from_secs(300);
 /// with since the ring was introduced (1.68 s at 20 Msps for `ring_seconds = 1`),
 /// and it is kept on purpose: a sample the ring drops is audio lost for good,
 /// while a backlogged DSP thread running behind the air only delays it — and
-/// since the stream clock accounts for drops and backlog (review 2026-09-22, R1)
-/// that delay no longer skews a single timestamp. Whole blocks keep the stream
+/// since the stream clock accounts for drops and backlog that delay no longer
+/// skews a single timestamp. Whole blocks keep the stream
 /// clock's drop accounting exact. `rtrb` itself has no power-of-two requirement.
 ///
 /// Never smaller than two DSP blocks, or the "wait for a full block" rule could
@@ -406,6 +413,9 @@ pub(crate) struct DeviceUnit {
     /// ids and to pick this device's epoch.
     tuner_index: usize,
     sites: Vec<SiteEngineSpec>,
+    /// The enabled NBFM channels this device serves; empty (and unallocated)
+    /// when the config has none.
+    channels: Vec<Arc<ChannelSpec>>,
     shared: Shared,
     /// This device's own stream timeline (per-tuner, not shared).
     epoch: Arc<StreamEpoch>,
@@ -567,11 +577,19 @@ impl DeviceUnit {
         .flatten();
 
         let ppm_memory = resolve_ppm_memory(cfg, device, &shared);
+        // Empty, with no allocation, when `cfg.channel` has no enabled NBFM
+        // channel — the zero-cost path every P25-only recorder takes.
+        let channels: Vec<Arc<ChannelSpec>> = conventional::channel_specs(cfg)
+            .into_iter()
+            .filter(|c| c.device_id == device.id)
+            .map(Arc::new)
+            .collect();
 
         DeviceUnit {
             device: device.clone(),
             tuner_index,
             sites,
+            channels,
             shared,
             epoch,
             calls_tx,
@@ -602,6 +620,14 @@ impl DeviceUnit {
                     .counter(&format!("device.{}.spectrum_frames", self.device.id)),
             )
         })
+    }
+
+    /// This device will not join the replay clock on this build (it idles or
+    /// failed before its stream opened): give up its reservation so iqfile
+    /// peers waiting for it go on now rather than at the join deadline. A
+    /// no-op for a device that holds none (live, real-time, already joined).
+    fn leave_replay_clock(&self) {
+        self.shared.replay_clock.withdraw(&self.device.id);
     }
 
     /// Open the configured backend and start it streaming.
@@ -733,8 +759,8 @@ impl DeviceUnit {
         // Every unthrottled replay of this run on one clock, so a grant the
         // control front decodes reaches a voice front replaying the same
         // capture at the same moment of its file — not seconds after its DSP
-        // thread raced past the call (T-B8).
-        .with_lockstep(self.shared.replay_clock.clone());
+        // thread raced past the call.
+        .with_lockstep(self.shared.replay_clock.clone(), self.device.id.clone());
         Box::new(tuner).start(stream_cfg, &self.shared.metrics)
     }
 
@@ -745,13 +771,21 @@ impl DeviceUnit {
     /// (see [`DeviceUnit::new`]), so the first one describes the capture for
     /// all of them; an engine whose config disagreed would be refused by
     /// [`SiteEngine::with_bank`] rather than silently decoding the wrong band.
+    ///
+    /// A device with no site but conventional channels builds the bank from
+    /// its own rate and centre instead ([`conventional::channel_only_bank`]).
     fn build_engines(&self) -> Result<(SharedChannelBank, Vec<(usize, SiteEngine)>), RunError> {
-        let first = self
-            .sites
-            .first()
-            .ok_or_else(|| format!("device '{}': no enabled site uses it", self.device.id))?;
-        let bank = SiteEngine::bank_for(&first.engine)
-            .map_err(|e| format!("site '{}': {e}", self.shared.sites[first.index].display))?;
+        let bank = match self.sites.first() {
+            Some(first) => SiteEngine::bank_for(&first.engine)
+                .map_err(|e| format!("site '{}': {e}", self.shared.sites[first.index].display))?,
+            None if !self.channels.is_empty() => conventional::channel_only_bank(&self.device)?,
+            None => {
+                return Err(format!(
+                    "device '{}': no enabled site uses it",
+                    self.device.id
+                ))
+            }
+        };
         let engines = self
             .sites
             .iter()
@@ -782,17 +816,40 @@ impl DeviceUnit {
         Ok((bank, engines))
     }
 
+    /// One [`ConvEngine`] per conventional channel on this device, each
+    /// subscribed on `bank`. A channel the capture cannot reach (keyup moved
+    /// the centre or rate away from what the config was validated against) is
+    /// reported and skipped rather than taking the device's P25 sites down.
+    fn build_conv_engines(&self, bank: &SharedChannelBank) -> Vec<ConvEngine> {
+        self.channels
+            .iter()
+            .filter_map(|spec| {
+                match ConvEngine::new(spec.clone(), bank, BLOCK_SAMPLES, &self.shared.metrics) {
+                    Ok(engine) => Some(engine),
+                    Err(e) => {
+                        tracing::error!(device = %self.device.id, error = %e, "conventional channel not started");
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// The DSP loop proper: drain, decode, route, repeat.
     ///
     /// `last_block_ms` is left holding the stream time of the last block
     /// processed, so whatever is routed after the loop (the shutdown's call
     /// closes) is stamped at the end of the stream rather than at its start.
+    // Eight: the bank and both engine sets are the DSP loop's working set,
+    // owned by `run` so the shutdown below can finish them after the loop.
+    #[allow(clippy::too_many_arguments)]
     fn pump(
         &self,
         ctx: &SupervisionContext,
         stream: &mut TunerStream,
         bank: &SharedChannelBank,
         engines: &mut [(usize, SiteEngine)],
+        conv: &mut [ConvEngine],
         spectrum: &mut Option<SpectrumTap>,
         last_block_ms: &mut u64,
     ) -> Result<(), RunError> {
@@ -999,6 +1056,13 @@ impl DeviceUnit {
                         let index = *index;
                         engine.process_channels(&mut |ev| router.route(index, block_end_ms, ev));
                     }
+                    // Conventional channels, after the sites: an empty slice
+                    // (no work at all) on a device with none.
+                    for c in conv.iter_mut() {
+                        c.process(bank, part.len(), &mut |spec, id, ev| {
+                            router.route_channel(spec, id, ev)
+                        });
+                    }
                 }
                 chunk.commit_all();
                 clock.commit(want);
@@ -1052,6 +1116,9 @@ impl DeviceUnit {
                     rssi_gauge.set_f64(dbfs);
                 }
                 channels_gauge.set(bank.borrow().channel_count() as u64);
+                for c in conv.iter() {
+                    c.publish(&|ms| self.epoch.wall_ms(ms));
+                }
                 if delta > 0 && per_sec >= self.overflow_warn_per_sec {
                     overflow_reports.inc();
                     tracing::warn!(
@@ -1294,6 +1361,7 @@ impl DeviceUnit {
         metrics
             .gauge(&format!("device.{}.channelizer_channels", self.device.id))
             .set(0);
+        conventional::clear_channel_gauges(metrics, &self.channels);
         for spec in self.sites.iter().filter(|s| s.sole_tuner) {
             let prefix = &self.shared.sites[spec.index].metric_prefix;
             for name in [
@@ -1426,15 +1494,17 @@ impl Supervised for DeviceUnit {
             if let Some(c) = &self.control {
                 c.confirm_applied();
             }
+            self.leave_replay_clock();
             return self.idle_until_change(ctx, "disabled by keyup");
         }
-        if self.sites.is_empty() {
+        if self.sites.is_empty() && self.channels.is_empty() {
             // Nothing to decode. Idle rather than spin-restarting.
             tracing::warn!(device = %self.device.id, "no enabled P25 site uses this device");
             self.note_not_decoding();
             if let Some(c) = &self.control {
                 c.confirm_applied();
             }
+            self.leave_replay_clock();
             return self.idle_until_change(ctx, "no enabled site uses this device");
         }
 
@@ -1442,8 +1512,14 @@ impl Supervised for DeviceUnit {
         // carries on at normal priority.
         crate::pipeline::priority::raise_current_thread(&self.device.id);
 
-        let (bank, mut engines) = self.build_engines()?;
-        let mut stream = self.start_stream()?;
+        let (bank, mut engines) = self
+            .build_engines()
+            .inspect_err(|_| self.leave_replay_clock())?;
+        // Empty (no allocation, no subscription) on a device with no channel.
+        let mut conv = self.build_conv_engines(&bank);
+        let mut stream = self
+            .start_stream()
+            .inspect_err(|_| self.leave_replay_clock())?;
 
         // The stream opened: this is the second phase of the two-phase adopt, so
         // the applied version now advances (a config that failed to open above
@@ -1463,6 +1539,14 @@ impl Supervised for DeviceUnit {
             ring_samples = ring_capacity_for(self.device.sample_rate, self.device.ring_seconds),
             "device streaming"
         );
+        if !conv.is_empty() {
+            tracing::info!(
+                device = %self.device.id,
+                channels = conv.len(),
+                names = %conv.iter().map(|c| c.spec().name.as_str()).collect::<Vec<_>>().join(", "),
+                "conventional channels recording"
+            );
+        }
 
         // A restarted device starts a fresh timeline.
         self.epoch.clear();
@@ -1473,19 +1557,27 @@ impl Supervised for DeviceUnit {
             &mut stream,
             &bank,
             &mut engines,
+            &mut conv,
             &mut spectrum,
             &mut last_block_ms,
         );
 
         // Finish every open call before the engines go away, so a shutdown
         // never silently loses audio that was already decoded. Stamped at the
-        // last block the stream delivered (review 2026-09-22, R6): routing
+        // last block the stream delivered: routing
         // them at stream time 0 put a shutdown's `PrivateCall` ends at the
         // stream's *start*, hours in the past.
         let router = self.router(None);
         for (index, engine) in &mut engines {
             let index = *index;
             engine.shutdown(&mut |ev| router.route(index, last_block_ms, ev));
+        }
+        // And every open conventional call, ended `shutdown` at the same
+        // instant.
+        for c in conv.iter_mut() {
+            c.finish(last_block_ms, &mut |spec, id, ev| {
+                router.route_channel(spec, id, ev)
+            });
         }
         stream.stop();
         // Zero the liveness heartbeat, and with it every figure this tuner was
@@ -1632,7 +1724,7 @@ struct EventRouter<'a> {
     /// Every site's `control_frequency_hz` gauge, by site index, resolved once:
     /// each control TSBK and followed-call signaling event reads it, and
     /// looking it up by name formatted a string and took the registry lock
-    /// per event (review 2026-09-22 §3.1 O4).
+    /// per event.
     control_hz: Vec<trunkd_core::Metric>,
     /// Where a control/auto front publishes out-of-band grants; `None` on the
     /// single-tuner fast path.
@@ -1670,6 +1762,34 @@ impl EventRouter<'_> {
                 .counter(crate::pipeline::calls::QUEUE_DROPPED)
                 .inc();
         }
+    }
+
+    /// Queue one conventional channel event for the call thread, its stream
+    /// times mapped to this device's wall clock. Moves the PCM, clones one
+    /// `Arc` at a call start; allocates nothing itself.
+    fn route_channel(&self, spec: &Arc<ChannelSpec>, id: u64, ev: trunkd_analog::ChannelEvent) {
+        use trunkd_analog::ChannelEvent;
+        let msg = match ev {
+            ChannelEvent::Started(start) => CallMsg::ConvStarted {
+                spec: spec.clone(),
+                id,
+                at_ms: self.stamp(start.at_ms) as u64,
+                start,
+                rssi: Some(self.rssi.clone()),
+            },
+            ChannelEvent::Pcm(pcm) => CallMsg::ConvPcm {
+                channel: spec.index,
+                id,
+                pcm,
+            },
+            ChannelEvent::Ended(end) => CallMsg::ConvEnded {
+                channel: spec.index,
+                id,
+                at_ms: self.stamp(end.at_ms) as u64,
+                end,
+            },
+        };
+        self.send_call(msg);
     }
 
     /// `block_ms` is the stream time of the block being routed, used only for
@@ -1761,7 +1881,7 @@ impl EventRouter<'_> {
                 first_for_talkgroup,
             } => {
                 // Phase 2 traffic this recorder heard granted and cannot
-                // decode yet (review 2026-09-22 §4 gap 2): counted per site,
+                // decode yet: counted per site,
                 // for the panel, and recorder-wide beside `calls.started`, for
                 // keyup — so the size of the gap is a number, not a guess.
                 metrics.counter(TDMA_REFUSED).inc();
@@ -2461,9 +2581,8 @@ mod tests {
     /// rebuild given its own channel, or a receiver that ended when a
     /// torn-down unit dropped its handle, would silence the event log at the
     /// first restart and never bring it back.
-    /// T-B5: events are stamped `epoch + stream time` — so a shutdown routed
-    /// at the last block's time lands at the end of the stream, not its start
-    /// (R6) — and a slewed epoch never stamps a later point of the stream
+    /// Events are stamped `epoch + stream time` — so a shutdown routed at the
+    /// last block's time lands at the end of the stream, not its start — and a slewed epoch never stamps a later point of the stream
     /// before an earlier one.
     #[test]
     fn routed_stamps_follow_the_block_and_never_go_backwards() {
@@ -2701,7 +2820,7 @@ mod tests {
         assert_eq!(flag("device.a.site_stats_seen"), Some(1));
     }
 
-    /// Review 2026-09-22, U6: the DSP → call queue evicts its oldest message
+    /// The DSP → call queue evicts its oldest message
     /// when the call thread falls behind, and that used to go uncounted — a
     /// lost `Ended` left no trace anywhere. Every eviction is now counted in
     /// `calls.queue_dropped`.
@@ -2777,7 +2896,7 @@ mod tests {
         assert!(matches!(calls_rx.try_recv(), Ok(CallMsg::Voice { .. })));
     }
 
-    /// Review 2026-09-22 §3.1 O4 / §3.2 (T-C3): every control-channel TSBK and
+    /// Every control-channel TSBK and
     /// every signaling event of a followed call is routed on the DSP thread.
     /// Routing one must not format a metric name or take the registry lock.
     #[test]
@@ -2912,8 +3031,8 @@ mod tests {
 
     /// Two `[[site]]`s on one tuner: the device builds one filterbank and both
     /// engines read it; the control frequency both sites list is produced once.
-    /// (Review 2026-09-22 §3.1 O1: each site used to build its own, and four
-    /// on one HackRF overran the DSP thread.)
+    /// (Each site used to build its own, and four on one HackRF overran the
+    /// DSP thread.)
     #[test]
     fn sites_on_one_device_share_one_channelizer() {
         use trunkd_p25::dsp::channelizer::channelizers_built_on_this_thread;
@@ -2992,6 +3111,229 @@ mod tests {
         // Per-site pools are untouched by the sharing.
         let pools: Vec<usize> = engines.iter().map(|(_, e)| e.stats().pool_size).collect();
         assert_eq!(pools, [20, 0]);
+    }
+
+    // -- conventional channels ---------------------------------------------
+
+    /// A unit for `cfg.device[0]`, its call queue handed back.
+    fn conv_unit(
+        cfg: &Config,
+        shared: Shared,
+    ) -> (DeviceUnit, trunkd_core::chan::BoundedReceiver<CallMsg>) {
+        let (ctx, crx) = trunkd_core::chan::bounded::<CallMsg>(64);
+        let (otx, _ox) = trunkd_core::chan::bounded::<ObsMsg>(4);
+        let unit = DeviceUnit::new(
+            cfg,
+            &cfg.device[0],
+            0,
+            shared,
+            Arc::new(StreamEpoch::default()),
+            Arc::new(ctx),
+            Arc::new(otx),
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+            &|i| (i == 0).then_some(0),
+        );
+        (unit, crx)
+    }
+
+    /// The zero-cost path: a P25-only device has no channel spec, builds no
+    /// conventional engine (allocating nothing to find that out) and its bank
+    /// carries exactly the site's subscriptions.
+    #[test]
+    fn a_p25_only_device_builds_no_conventional_engine() {
+        let cfg = one_tuner_config();
+        let (unit, _crx) = conv_unit(&cfg, shared_for(&cfg));
+        assert!(unit.channels.is_empty());
+        assert_eq!(unit.channels.capacity(), 0, "nothing allocated");
+        let (bank, _engines) = unit.build_engines().expect("engines build");
+        let subs = bank.borrow().subscription_count();
+        let (conv, allocs) = crate::testalloc::count(|| unit.build_conv_engines(&bank));
+        assert!(conv.is_empty());
+        assert_eq!(allocs, 0);
+        assert_eq!(bank.borrow().subscription_count(), subs, "no subscription");
+    }
+
+    /// Sites and channels on one device share one filterbank: the channel is
+    /// one more subscription on the bank the site engine reads.
+    #[test]
+    fn sites_and_channels_on_one_device_share_one_bank() {
+        use trunkd_p25::dsp::channelizer::channelizers_built_on_this_thread;
+
+        let mut cfg = one_tuner_config();
+        cfg.channel = toml::from_str::<Config>(
+            r#"
+            [[channel]]
+            name = "Ops"
+            device = "a"
+            frequency = 853000000
+            "#,
+        )
+        .expect("channel")
+        .channel;
+        let (unit, _crx) = conv_unit(&cfg, shared_for(&cfg));
+        assert_eq!(unit.channels.len(), 1);
+        let built = channelizers_built_on_this_thread();
+        let (bank, engines) = unit.build_engines().expect("engines build");
+        let before = bank.borrow().channel_count();
+        let conv = unit.build_conv_engines(&bank);
+        assert_eq!(
+            channelizers_built_on_this_thread() - built,
+            1,
+            "one filterbank for the site and the channel"
+        );
+        assert_eq!(engines.len(), 1);
+        assert_eq!(conv.len(), 1);
+        assert!(std::rc::Rc::ptr_eq(engines[0].1.channel_bank(), &bank));
+        let b = bank.borrow();
+        assert_eq!(b.channel_count(), before + 1);
+        assert_eq!(
+            b.subscribed_frequency(conv[0].handle()),
+            Some(853_000_000.0)
+        );
+    }
+
+    /// A device carrying only channels builds its bank from its own rate and
+    /// centre, with no site engine.
+    #[test]
+    fn a_channels_only_device_builds_its_own_bank() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[device]]
+            id = "vhf"
+            backend = "iqfile"
+            path = "/dev/null"
+            sample_rate = 2000000
+            center_frequency = 154500000
+            [[channel]]
+            name = "Fire Dispatch"
+            frequency = 154250000
+            "#,
+        )
+        .expect("parse");
+        let (unit, _crx) = conv_unit(&cfg, shared_for(&cfg));
+        assert!(unit.sites.is_empty());
+        let (bank, engines) = unit.build_engines().expect("a bank without a site");
+        assert!(engines.is_empty());
+        let conv = unit.build_conv_engines(&bank);
+        assert_eq!(conv.len(), 1);
+        let b = bank.borrow();
+        assert_eq!(b.sample_rate(), 2_000_000);
+        assert_eq!(b.center_hz(), 154_500_000.0);
+        assert_eq!(
+            b.taps_per_channel(),
+            trunkd_p25::site::SiteConfig::default().taps_per_channel
+        );
+    }
+
+    /// Conventional events are stamped with the device's wall clock and
+    /// queued as `Conv*` messages; routing a PCM batch allocates nothing.
+    #[test]
+    fn channel_events_are_stamped_and_queued() {
+        use trunkd_analog::{CallEnd, CallStart, ChannelEvent, EndReason};
+
+        let cfg = one_tuner_config();
+        let (unit, crx) = conv_unit(&cfg, shared_for(&cfg));
+        unit.epoch.set_once(1_700_000_000_000);
+        let router = unit.router(None);
+        let spec = Arc::new(
+            crate::pipeline::conventional::channel_specs(
+                &toml::from_str::<Config>(
+                    r#"
+                [[device]]
+                id = "a"
+                sample_rate = 20000000
+                center_frequency = 855500000
+                [[channel]]
+                name = "Ops"
+                frequency = 853000000
+                "#,
+                )
+                .expect("parse"),
+            )
+            .remove(0),
+        );
+        router.route_channel(
+            &spec,
+            7,
+            ChannelEvent::Started(CallStart {
+                at_ms: 1_000,
+                power_dbfs: -30.0,
+                snr_db: 20.0,
+                tone_detected: None,
+            }),
+        );
+        let pcm = vec![0i16; 800];
+        let ((), allocs) =
+            crate::testalloc::count(|| router.route_channel(&spec, 7, ChannelEvent::Pcm(pcm)));
+        assert_eq!(allocs, 0, "the PCM moves, nothing is allocated");
+        router.route_channel(
+            &spec,
+            7,
+            ChannelEvent::Ended(CallEnd {
+                at_ms: 3_000,
+                reason: EndReason::SquelchClosed,
+                duration_ms: 2_000,
+                tone_detected: None,
+                power_dbfs: -30.0,
+                snr_db: 20.0,
+                peak_deviation_hz: 2_000.0,
+                offset_hz: 0.0,
+            }),
+        );
+        match crx.try_recv() {
+            Ok(CallMsg::ConvStarted {
+                id, at_ms, spec: s, ..
+            }) => {
+                assert_eq!((id, at_ms), (7, 1_700_000_001_000));
+                assert!(Arc::ptr_eq(&s, &spec));
+            }
+            other => panic!("expected ConvStarted, got {other:?}"),
+        }
+        assert!(matches!(
+            crx.try_recv(),
+            Ok(CallMsg::ConvPcm { channel: 0, id: 7, ref pcm }) if pcm.len() == 800
+        ));
+        assert!(matches!(
+            crx.try_recv(),
+            Ok(CallMsg::ConvEnded {
+                id: 7,
+                at_ms: 1_700_000_003_000,
+                ..
+            })
+        ));
+    }
+
+    /// A tuner that stops publishes "not decoding" for its channels too.
+    #[test]
+    fn a_stopped_tuner_clears_its_channel_gauges() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[device]]
+            id = "vhf"
+            backend = "iqfile"
+            path = "/dev/null"
+            sample_rate = 2000000
+            center_frequency = 154500000
+            [[channel]]
+            name = "Fire Dispatch"
+            frequency = 154250000
+            "#,
+        )
+        .expect("parse");
+        let shared = shared_for(&cfg);
+        let (unit, _crx) = conv_unit(&cfg, shared.clone());
+        shared.metrics.gauge("channel.0.open").set(1);
+        shared.metrics.gauge("channel.0.snr_db").set_f64(20.0);
+        unit.note_not_decoding();
+        assert_eq!(shared.metrics.gauge("channel.0.open").get(), 0);
+        assert_eq!(
+            shared.metrics.gauge("channel.0.snr_db").get(),
+            0f64.to_bits()
+        );
     }
 
     // -- supervision: a tuner that cannot open ------------------------------

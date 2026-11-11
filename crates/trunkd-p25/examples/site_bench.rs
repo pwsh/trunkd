@@ -10,7 +10,7 @@
 //! pool 0) — the configuration whose ring
 //! overflowed.
 //!
-//! `--mode shared` (the default) is the recorder since T-C1: one
+//! `--mode shared` (the default) is what the recorder runs: one
 //! [`ChannelBank`](trunkd_p25::dsp::ChannelBank) for the device, run once per block, then every engine reads
 //! its channels. `--mode private` is the shape before it: every engine builds
 //! and runs a filterbank of its own over the same block.

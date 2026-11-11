@@ -16,13 +16,15 @@
 //!
 //! trunkd's own additions — `recorder`, `site`, `systemLabel`, `nac`,
 //! `algorithm`, `keyId`, `talkerAlias`, `sourceWacn`, `sourceSystem`,
-//! `sourceQuality`, `speechS`, `source` — are extra keys that
+//! `sourceQuality`, `speechS`, `source`, and for a conventional (analog)
+//! channel's call `mode`, `decoder`, `tone`, `toneDetected`, `squelchReason`,
+//! `snrDb`, `peakDeviationHz`, `offsetHz` — are extra keys that
 //! trunk-recorder never writes; Keyup keeps unknown keys in `raw_meta`, and
 //! `trunkd-uplink` reads them back to rebuild a spooled call for retry.
 
 use serde_json::{json, Map, Value};
 
-use crate::call::{CallKind, FinishedCall};
+use crate::call::{CallKind, ConventionalInfo, FinishedCall, WireValue};
 
 /// Render a call as a trunk-recorder-style JSON sidecar (pretty-printed).
 pub fn sidecar_json(call: &FinishedCall) -> String {
@@ -69,7 +71,9 @@ pub fn sidecar_json(call: &FinishedCall) -> String {
         "talkgroup": call.talkgroup,
         "emergency": u8::from(call.emergency),
         "encrypted": u8::from(call.encrypted),
-        "audio_type": "digital",
+        // trunk-recorder's vocabulary: a conventional channel's call is
+        // `analog`, everything P25 is `digital`, as it always was.
+        "audio_type": if call.conventional.is_some() { "analog" } else { "digital" },
         "short_name": call.system,
         "patched_talkgroups": call.patches,
         "srcList": src_list,
@@ -135,6 +139,19 @@ pub fn sidecar_json(call: &FinishedCall) -> String {
         }
     }
 
+    // A conventional call's analog extras, under the same names the upload
+    // uses, so a spooled call is retried with them (`conventional_from_sidecar`
+    // reads them back). Absent for a P25 call.
+    if let Some(info) = &call.conventional {
+        for (name, value) in info.wire_fields() {
+            let v = match value {
+                WireValue::Text(t) => json!(t),
+                WireValue::Number(n) => json!(n),
+            };
+            obj.insert(name.into(), v);
+        }
+    }
+
     // The Broadcastify verdict for this call, written so a spooled retry is
     // pushed to Keyup with the outcome the live attempt already produced —
     // and so nothing re-registers the call with Broadcastify on the way out of
@@ -146,6 +163,33 @@ pub fn sidecar_json(call: &FinishedCall) -> String {
     }
 
     serde_json::to_string_pretty(&root).expect("a JSON object of scalars always serializes")
+}
+
+/// The analog extras of a sidecar [`sidecar_json`] wrote for a conventional
+/// call, or `None` for a P25 (digital) sidecar. What the spool uses to rebuild
+/// a spooled conventional call for retry.
+pub fn conventional_from_sidecar(obj: &Map<String, Value>) -> Option<ConventionalInfo> {
+    if obj.get("audio_type").and_then(Value::as_str) != Some("analog") {
+        return None;
+    }
+    let text = |k: &str| {
+        obj.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let num = |k: &str| obj.get(k).and_then(Value::as_f64).map(|v| v as f32);
+    let defaults = ConventionalInfo::nbfm();
+    Some(ConventionalInfo {
+        mode: text("mode").unwrap_or(defaults.mode),
+        decoder: text("decoder").unwrap_or(defaults.decoder),
+        tone: text("tone"),
+        tone_detected: text("toneDetected"),
+        squelch_reason: text("squelchReason"),
+        snr_db: num("snrDb"),
+        peak_deviation_hz: num("peakDeviationHz"),
+        offset_hz: num("offsetHz"),
+    })
 }
 
 /// Round to milliseconds; sidecar positions are never finer than that.
@@ -296,5 +340,154 @@ mod tests {
         assert_eq!(json["algorithm"], "AES-256");
         assert_eq!(json["keyId"], 42);
         assert_eq!(json["call_length"], 3.0);
+    }
+
+    /// A digital call's sidecar is exactly what it was before conventional
+    /// channels existed (`audio_type: digital`, no analog keys). Golden
+    /// captured from the pre-NBFM build.
+    #[test]
+    fn a_digital_sidecar_is_identical_to_the_golden() {
+        let mut b = CallBuilder::new(
+            "Example Network",
+            "Site 1",
+            1_788_012_000_123,
+            851_012_500,
+            52101,
+        );
+        b.set_talkgroup_label(Some("PD DISPATCH".into()));
+        b.set_nac(Some(0x1A2));
+        b.set_patches(vec![19282, 50051]);
+        b.set_talker_alias(Some("ENGINE 3".into()));
+        b.set_source_suid(Some(0xBEE00), Some(0x101));
+        b.set_encryption(Some("AES-256".into()), Some(42));
+        b.talker(9_000_011, 1_788_012_000_123, false, Some("UNIT_313".into()));
+        b.push_pcm(&[0i16; 8000]);
+        b.talker(9_000_012, 1_788_012_001_123, true, None);
+        b.add_errors(4);
+        let call = b.finish(1_788_012_002_123);
+        let got = sidecar_json(&call);
+        assert_eq!(got, DIGITAL_SIDECAR_GOLDEN);
+    }
+
+    const DIGITAL_SIDECAR_GOLDEN: &str = r##"{
+  "algorithm": "AES-256",
+  "audio_type": "digital",
+  "call_length": 2.0,
+  "call_length_ms": 2000,
+  "emergency": 1,
+  "encrypted": 1,
+  "freq": 851012500,
+  "freqList": [
+    {
+      "error_count": 4,
+      "freq": 851012500,
+      "len": 2.0,
+      "pos": 0.0,
+      "spike_count": 0,
+      "time": 1788012000
+    }
+  ],
+  "keyId": 42,
+  "nac": 418,
+  "patched_talkgroups": [
+    19282,
+    50051
+  ],
+  "recorder": "trunkd",
+  "short_name": "Example Network",
+  "site": "Site 1",
+  "source": 9000011,
+  "sourceSystem": 257,
+  "sourceWacn": 781824,
+  "speechS": 0.0,
+  "srcList": [
+    {
+      "emergency": 0,
+      "pos": 0.0,
+      "signal_system": "",
+      "src": 9000011,
+      "tag": "UNIT_313",
+      "time": 1788012000
+    },
+    {
+      "emergency": 1,
+      "pos": 1.0,
+      "signal_system": "",
+      "src": 9000012,
+      "tag": "",
+      "time": 1788012001
+    }
+  ],
+  "start_time": 1788012000,
+  "start_time_ms": 1788012000123,
+  "stop_time": 1788012002,
+  "stop_time_ms": 1788012002123,
+  "systemLabel": "Example Network",
+  "talkerAlias": "ENGINE 3",
+  "talkgroup": 52101,
+  "talkgroup_group_tag": "PD DISPATCH"
+}"##;
+
+    fn conventional_info() -> ConventionalInfo {
+        ConventionalInfo {
+            tone: Some("167.9".into()),
+            tone_detected: Some("167.9".into()),
+            squelch_reason: Some("squelch_closed".into()),
+            snr_db: Some(18.26),
+            peak_deviation_hz: Some(2_312.04),
+            offset_hz: Some(-41.96),
+            ..ConventionalInfo::nbfm()
+        }
+    }
+
+    /// A conventional call is `analog` and carries the analog extras under the
+    /// upload's names; it has no radios.
+    #[test]
+    fn a_conventional_sidecar_is_analog_with_the_extras() {
+        let mut b = CallBuilder::new(
+            "Example County Fire",
+            "Example Hill",
+            1_788_012_000_000,
+            154_250_000,
+            154_250,
+        );
+        b.set_talkgroup_label(Some("Fire Dispatch".into()));
+        b.set_conventional(Some(conventional_info()));
+        b.push_pcm(&[0i16; 8000]);
+        let json: Value =
+            serde_json::from_str(&sidecar_json(&b.finish(1_788_012_001_000))).expect("json");
+        assert_eq!(json["audio_type"], "analog");
+        assert_eq!(json["mode"], "nbfm");
+        assert_eq!(json["decoder"], "NBFM");
+        assert_eq!(json["tone"], "167.9");
+        assert_eq!(json["toneDetected"], "167.9");
+        assert_eq!(json["squelchReason"], "squelch_closed");
+        assert_eq!(json["snrDb"], 18.3);
+        assert_eq!(json["peakDeviationHz"], 2312.0);
+        assert_eq!(json["offsetHz"], -42.0);
+        assert_eq!(json["talkgroup"], 154_250);
+        assert_eq!(json["talkgroup_group_tag"], "Fire Dispatch");
+        assert_eq!(json["srcList"], json!([]));
+        assert!(json.get("source").is_none());
+    }
+
+    /// The extras survive a spool round trip; a digital sidecar has none.
+    #[test]
+    fn the_analog_extras_read_back_from_a_sidecar() {
+        let mut b = CallBuilder::new("S", "T", 1_000, 154_250_000, 1);
+        b.set_conventional(Some(conventional_info()));
+        let v: Value = serde_json::from_str(&sidecar_json(&b.finish(2_000))).expect("json");
+        let back = conventional_from_sidecar(v.as_object().expect("object")).expect("analog");
+        assert_eq!(back.mode, "nbfm");
+        assert_eq!(back.tone.as_deref(), Some("167.9"));
+        assert_eq!(back.squelch_reason.as_deref(), Some("squelch_closed"));
+        assert_eq!(back.snr_db, Some(18.3));
+        assert_eq!(back.offset_hz, Some(-42.0));
+
+        let v: Value = serde_json::from_str(&sidecar_json(&sample_call())).expect("json");
+        assert_eq!(
+            conventional_from_sidecar(v.as_object().expect("object")),
+            None
+        );
     }
 }

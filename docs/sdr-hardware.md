@@ -255,6 +255,49 @@ re-measure. A corrupt or unreadable file costs one warning and is ignored. With 
 nothing is applied: `ppm` is yours alone, and the memory is only reported so you can see the number
 worth typing.
 
+## Tuners for conventional channels
+
+A tuner can carry analog `[[channel]]`s alongside a P25 site, or channels alone
+([configuration.md](configuration.md#channel--one-conventional-analog-channel)). The channels come
+out of the same channelizer, so the sample-rate rule above applies unchanged. A few things differ
+on a **channel-only tuner** (no `[[site]]` on it):
+
+* **No automatic frequency correction.** `auto_ppm` is driven by the P25 control-channel hunt, and
+  a channel-only tuner has nothing to hunt, so it never measures or corrects its own offset. A
+  correction remembered from an earlier run of the same board with a site is still applied at
+  open; otherwise set `ppm` by hand. Each call reports its measured carrier offset (`offsetHz` on
+  the upload, `channel.N.offset_hz` in metrics), which is the number to watch: one ppm at 155 MHz is
+  155 Hz, so a dongle 30 ppm out puts a VHF carrier about 4.7 kHz off — past the ±4 kHz passband
+  of a 12.5 kHz channel's filter, with its audio badly distorted or lost. Aim for an offset under a
+  few hundred Hz.
+  Several channels on one tuner should all show about the same offset in ppm; one that differs is
+  a transmitter that is off frequency, not the tuner.
+* **Keep channels off the centre.** The capture centre (DC) bin is refused at start, and on
+  zero-IF radios (RTL-SDR, SDRplay) the centre also carries the local-oscillator spur. Put
+  `center_frequency` at least 25 kHz from every channel.
+* **The analog filter, not the sample rate, sets the usable span.** `sample_rate` decides what the
+  channelizer can address (`center_frequency ± (sample_rate/2 − 12.5 kHz)`, which `trunkd check`
+  enforces); the radio's own IF filter (`bandwidth_hz` on Soapy devices, chosen by the driver when
+  unset) decides what actually arrives unattenuated. On radios whose filter steps are narrower than
+  the sample rate — an SDRplay at 2 Msps with a 1.536 MHz filter, for example — a channel between
+  the filter edge and the capture edge passes the check and then records weakly or not at all,
+  with energy folded in from beyond the edge. Keep every channel inside the filter with some
+  margin; the 1 % edge warning at start is a floor, not a guarantee.
+* **Choosing a centre.** Start at the midpoint of the lowest and highest channel, check that the
+  spread plus a margin at each edge fits inside the analog filter, then nudge the centre (by
+  50–100 kHz, say) until no channel is within 25 kHz of it and none sits near the filter edge.
+  Avoid centring on a strong local transmitter you do not record. `trunkd check` validates the
+  result; if the channels do not fit in one capture, split them over two tuners.
+* **Gain.** Conventional channels are often stronger and closer than a P25 site. The squelch is
+  relative to the tracked noise floor, so it does not care about absolute level, but an overloaded
+  front end raises that floor for every channel: reduce gain until the waterfall's floor stops
+  falling with it.
+
+The per-channel cost is small next to the filterbank: on a 3 GHz desktop CPU each busy channel
+takes about 0.35 % of one core, so eleven channels on a 10 Msps tuner add roughly 4 % of a core to
+the filterbank's ~14 %. `cargo test --release -p trunkd-analog --test bench -- --ignored
+--nocapture` measures it on your own hardware.
+
 ## Sizing the host
 
 * **CPU.** The channelizer's cost scales with the sample rate, not with how busy the site is. As a

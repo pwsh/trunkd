@@ -231,6 +231,11 @@
     <div class="wrap"><table id="sites"></table></div>
   </section>
 
+  <section id="convsec" hidden>
+    <h2>Conventional channels</h2>
+    <div class="wrap"><table id="convchans"></table></div>
+  </section>
+
   <section>
     <h2>Supervisor</h2>
     <div class="wrap"><table id="supervisor"></table></div>
@@ -858,6 +863,34 @@ function renderPrivateCalls(rows) {
     ]));
 }
 
+// Conventional (analog) channels, one row per `[[channel]]`, from the
+// `channel.{i}.*` gauges. Hidden when the recorder has none, so a P25-only
+// panel looks exactly as it always has.
+function convState(s) {
+  const cls = s === "open" || s === "hang" ? "ok" : s === "opening" ? "warn" : "dim";
+  return `<span class="pill ${cls}">${esc(s)}</span>`;
+}
+function renderChannels(rows) {
+  $("convsec").hidden = rows.length === 0;
+  if (!rows.length) return;
+  table($("convchans"), ["channel", "frequency", "tone", "device", "squelch", "SNR dB",
+    "calls", "last call", "tone mismatches", "false opens"],
+    rows.map((c) => [
+      esc(c.name) + (c.system ? ` <span class="dim">· ${esc(c.system)}</span>` : ""),
+      // Five places, so a 6.25 kHz-step channel is not rounded onto its neighbour.
+      (c.frequency_hz / 1e6).toFixed(5).replace(/0$/, "") + " MHz",
+      c.tone ? esc(c.tone) : '<span class="dim">carrier</span>',
+      esc(c.device),
+      convState(c.state),
+      num(c.snr_db, 1),
+      esc(c.calls) + (c.calls_too_short
+        ? ` <span class="dim" title="openings shorter than min_call_ms">· ${esc(c.calls_too_short)} short</span>` : ""),
+      c.last_call_end_ms ? new Date(c.last_call_end_ms).toLocaleTimeString() : "—",
+      esc(c.tone_mismatch),
+      esc(c.false_opens),
+    ]));
+}
+
 // What the recorder is decoding. Two tables off one status field: the calls up
 // right now (elapsed ticking every second, between polls) and the last few that
 // finished. `monitorOn` gates the listen buttons — a page whose recorder is not
@@ -1041,6 +1074,7 @@ function render(s) {
 
   lastSites = s.sites || [];
   renderSites(lastSites);
+  renderChannels(s.channels || []);
 
   table($("supervisor"), ["unit", "state", "restarts", "heartbeat"],
     (s.supervisor || []).map((u) => [

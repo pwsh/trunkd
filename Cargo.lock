@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "trunkd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crossbeam-channel",
@@ -1383,6 +1383,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "trunkd-analog",
  "trunkd-call",
  "trunkd-core",
  "trunkd-link",
@@ -1398,8 +1399,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunkd-analog"
+version = "0.2.0"
+dependencies = [
+ "num-complex",
+ "serde",
+ "thiserror",
+ "trunkd-analog",
+ "trunkd-p25",
+]
+
+[[package]]
 name = "trunkd-call"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hound",
  "mp3lame-encoder",
@@ -1411,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "trunkd-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "num-complex",
@@ -1422,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "trunkd-link"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hmac",
  "postcard",
@@ -1434,11 +1446,11 @@ dependencies = [
 
 [[package]]
 name = "trunkd-mbe"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "trunkd-p25"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "num-complex",
  "rustfft",
@@ -1451,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "trunkd-sdr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hound",
  "libloading",
@@ -1465,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "trunkd-supervisor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tracing",
  "trunkd-core",
@@ -1473,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "trunkd-uplink"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "libc",

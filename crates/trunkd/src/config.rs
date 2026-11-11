@@ -1158,45 +1158,215 @@ pub enum ChannelMode {
     Am,
 }
 
-/// Squelch parameters for a conventional analog channel.
+/// `[channel.squelch]` — squelch and call-segmentation tuning for one
+/// conventional channel. Every field is optional; an unset one takes the
+/// engine default ([`trunkd_analog::SquelchParams::default`]).
 ///
-/// Mirrors sdrtrunk's `decodeConfigNBFM` squelch attributes.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// The four `noise_*`/`hysteresis_*` fields are sdrtrunk's dimensionless
+/// `decodeConfigNBFM` squelch attributes. `trunkd import-sdrtrunk` copies them
+/// and older configs carry them, so they are still accepted, but they mean
+/// nothing to trunkd's dB squelch and are ignored (logged once at load).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Squelch {
-    /// Noise-power threshold below which the squelch opens.
-    pub noise_open: f32,
-    /// Noise-power threshold above which the squelch closes.
-    pub noise_close: f32,
-    /// Consecutive over-threshold measurements required to open.
-    pub hysteresis_open: u32,
-    /// Consecutive under-threshold measurements required to close.
-    pub hysteresis_close: u32,
+    /// Open when channel power is at least this many dB above the tracked
+    /// noise floor. Default 8.0; must be greater than `close_db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_db: Option<f32>,
+    /// Close when channel power falls to or below this many dB above the noise
+    /// floor. Default 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_db: Option<f32>,
+    /// How long power must stay above `open_db` before the squelch opens, ms.
+    /// Default 40.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_ms: Option<u32>,
+    /// How long power must stay below `close_db` before a call ends, ms; a
+    /// re-key inside it continues the call. Default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hang_ms: Option<u32>,
+    /// Tone-gated channels: how long after carrier-up the tone must be
+    /// confirmed before the held audio is discarded, ms. Default 750.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone_timeout_ms: Option<u32>,
+    /// Longest call, seconds; a longer transmission is split. Default 180.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_call_s: Option<u32>,
+    /// Shortest call kept, ms; shorter ones (kerchunks) are dropped and
+    /// counted. Default 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_call_ms: Option<u32>,
+    /// Legacy sdrtrunk field; accepted and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_open: Option<f32>,
+    /// Legacy sdrtrunk field; accepted and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_close: Option<f32>,
+    /// Legacy sdrtrunk field; accepted and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteresis_open: Option<u32>,
+    /// Legacy sdrtrunk field; accepted and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hysteresis_close: Option<u32>,
+}
+
+impl Squelch {
+    /// Whether any of sdrtrunk's legacy squelch fields is set.
+    pub fn has_legacy_fields(&self) -> bool {
+        self.noise_open.is_some()
+            || self.noise_close.is_some()
+            || self.hysteresis_open.is_some()
+            || self.hysteresis_close.is_some()
+    }
+
+    /// The engine's squelch settings: each set field over the defaults.
+    pub fn params(&self) -> trunkd_analog::SquelchParams {
+        let d = trunkd_analog::SquelchParams::default();
+        trunkd_analog::SquelchParams {
+            open_db: self.open_db.unwrap_or(d.open_db),
+            close_db: self.close_db.unwrap_or(d.close_db),
+            attack_ms: self.attack_ms.unwrap_or(d.attack_ms),
+            hang_ms: self.hang_ms.unwrap_or(d.hang_ms),
+            tone_timeout_ms: self.tone_timeout_ms.unwrap_or(d.tone_timeout_ms),
+            max_call_s: self.max_call_s.unwrap_or(d.max_call_s),
+            min_call_ms: self.min_call_ms.unwrap_or(d.min_call_ms),
+        }
+    }
 }
 
 /// `[[channel]]` — one conventional analog channel.
+///
+/// Only `name` and `frequency` are required. A recorded call is filed in Keyup
+/// as a group call under (`system`, `talkgroup`) with `name` as its label.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
-    /// Display name.
+    /// Display name, sent as the call's `talkgroupLabel`.
     pub name: String,
-    /// Device id serving this channel.
+    /// System label the calls are filed under. Blank uses `[uplink]
+    /// system_label`. See [`Config::channel_system`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
+    /// Site label recorded on the calls. Blank uses `[uplink] site_label`, then
+    /// the device id. See [`Config::channel_site`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub site: String,
+    /// Device id serving this channel. Blank picks the one `[[device]]` whose
+    /// usable span covers `frequency` (an error if none or several do). See
+    /// [`Config::channel_device_for`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub device: String,
     /// Channel center frequency in Hz.
     pub frequency: u64,
-    /// Demodulation mode.
+    /// Demodulation mode. `am` is parsed but not recorded.
     #[serde(default)]
     pub mode: ChannelMode,
     /// Whether the channel is started at run time.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Channel bandwidth in Hz (12500 for narrowband, 25000 for wideband).
+    /// Channel bandwidth in Hz: 12500 (narrowband, ±2.5 kHz deviation), the
+    /// only value supported today. 25000 (wideband) is refused with a clear
+    /// error: the channel bank delivers one 12.5 kHz slice per channel.
     #[serde(default = "default_bandwidth_hz")]
     pub bandwidth_hz: u32,
-    /// Synthetic talkgroup id reported on calls from this channel.
+    /// Talkgroup id reported on calls from this channel. Unset uses
+    /// `frequency / 1000` (see [`Channel::talkgroup_id`]). Must be unique within
+    /// the channel's system across enabled channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub talkgroup: Option<u32>,
+    /// Required sub-audible tone: a CTCSS frequency in Hz from the standard
+    /// table (`"167.9"`) or a DCS code (`"D445N"`, `"D445I"`, `"445"`). Unset
+    /// is carrier squelch. A bare TOML number is accepted too.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_tone"
+    )]
+    pub tone: Option<String>,
+    /// DCS only: require an error-free code word instead of allowing a
+    /// single-bit correction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dcs_strict: bool,
+    /// De-emphasis time constant in µs. Unset is 750; 0 disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deemphasis_us: Option<u32>,
     /// Squelch tuning. Serialized last: TOML requires sub-tables after scalars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub squelch: Option<Squelch>,
+}
+
+/// `tone` as written, or a bare TOML number (`tone = 167.9`, `tone = 445`)
+/// turned into the same string.
+fn de_tone<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Text(String),
+        Int(i64),
+        Float(f64),
+    }
+    Ok(match Option::<Raw>::deserialize(d)? {
+        None => None,
+        Some(Raw::Text(s)) => Some(s),
+        Some(Raw::Int(i)) => Some(i.to_string()),
+        Some(Raw::Float(f)) => Some(format!("{f:.1}")),
+    })
+}
+
+impl Channel {
+    /// The talkgroup id calls are filed under: `talkgroup`, else
+    /// `frequency / 1000` (154.250 MHz → 154250).
+    pub fn talkgroup_id(&self) -> u32 {
+        self.talkgroup
+            .unwrap_or_else(|| u32::try_from(self.frequency / 1000).unwrap_or(u32::MAX))
+    }
+
+    /// The parsed `tone`; `None` is carrier squelch.
+    pub fn parsed_tone(&self) -> Result<Option<trunkd_analog::Tone>> {
+        self.tone
+            .as_deref()
+            .map(|t| {
+                t.parse::<trunkd_analog::Tone>()
+                    .map_err(|e| Error::config(format!("channel '{}': tone {t:?}: {e}", self.name)))
+            })
+            .transpose()
+    }
+
+    /// The engine settings this channel asks for, checked.
+    pub fn params(&self) -> Result<trunkd_analog::ChannelParams> {
+        // The channel bank hands each channel a 12.5 kHz slice (one bin, or
+        // a two-bin seam), so a 25 kHz channel would lose half its signal.
+        // `Bandwidth::Wide` stays reserved in the engine until the bank can
+        // deliver a wide slice.
+        let bandwidth = match self.bandwidth_hz {
+            12_500 => trunkd_analog::Bandwidth::Narrow,
+            25_000 => {
+                return Err(Error::config(format!(
+                    "channel '{}': 25 kHz channels are not supported yet \
+                     (bandwidth_hz = 25000); use 12500",
+                    self.name
+                )))
+            }
+            other => {
+                return Err(Error::config(format!(
+                    "channel '{}': bandwidth_hz must be 12500 (got {other})",
+                    self.name
+                )))
+            }
+        };
+        let defaults = trunkd_analog::ChannelParams::default();
+        let params = trunkd_analog::ChannelParams {
+            bandwidth,
+            tone: self.parsed_tone()?,
+            deemphasis_us: self.deemphasis_us.unwrap_or(defaults.deemphasis_us),
+            squelch: self.squelch.unwrap_or_default().params(),
+            dcs_strict: self.dcs_strict,
+        };
+        params
+            .validate()
+            .map_err(|e| Error::config(format!("channel '{}': {e}", self.name)))?;
+        Ok(params)
+    }
 }
 
 /// `[health]` — watchdog thresholds.
@@ -1465,6 +1635,14 @@ impl Config {
                  an empty token never authenticates"
             );
         }
+        for c in &self.channel {
+            if c.squelch.is_some_and(|q| q.has_legacy_fields()) {
+                tracing::info!(
+                    channel = %c.name,
+                    "legacy sdrtrunk squelch fields are ignored; use open_db/close_db"
+                );
+            }
+        }
     }
 
     /// Push the handful of settings that live in process-global state rather
@@ -1532,7 +1710,8 @@ impl Config {
                 self.channel
                     .iter()
                     .filter(|c| c.enabled)
-                    .map(|c| c.device.as_str()),
+                    .filter_map(|c| self.channel_device_for(c).ok())
+                    .map(|d| d.id.as_str()),
             );
         let mut ids: Vec<&str> = Vec::new();
         for id in referenced {
@@ -1541,6 +1720,75 @@ impl Config {
             }
         }
         ids
+    }
+
+    /// The device that serves channel `c`: the named `device`, or, when that
+    /// is blank, the one `[[device]]` whose usable span (see
+    /// [`usable_span_hz`]) covers the channel's frequency.
+    ///
+    /// Errors name the channel: an unknown device, no covering device, or
+    /// several (then the operator has to say which).
+    pub fn channel_device_for(&self, c: &Channel) -> Result<&Device> {
+        if !c.device.is_empty() {
+            return self
+                .device
+                .iter()
+                .find(|d| d.id == c.device)
+                .ok_or_else(|| {
+                    Error::config(format!(
+                        "channel '{}' references unknown device '{}'",
+                        c.name, c.device
+                    ))
+                });
+        }
+        let covering: Vec<&Device> = self
+            .device
+            .iter()
+            .filter(|d| {
+                usable_span_hz(d.center_frequency, d.sample_rate)
+                    .is_some_and(|(lo, hi)| c.frequency >= lo && c.frequency <= hi)
+            })
+            .collect();
+        match covering.as_slice() {
+            [d] => Ok(d),
+            [] => Err(Error::config(format!(
+                "channel '{}': no device's usable span covers {} Hz; set `device` \
+                 or a device `center_frequency` that reaches it",
+                c.name, c.frequency
+            ))),
+            several => Err(Error::config(format!(
+                "channel '{}': {} Hz is covered by several devices ({}); set `device`",
+                c.name,
+                c.frequency,
+                several
+                    .iter()
+                    .map(|d| d.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    }
+
+    /// System label calls from channel `c` are filed under: its `system`, else
+    /// `[uplink] system_label`.
+    pub fn channel_system<'a>(&'a self, c: &'a Channel) -> &'a str {
+        if c.system.trim().is_empty() {
+            &self.uplink.system_label
+        } else {
+            &c.system
+        }
+    }
+
+    /// Site label recorded on calls from channel `c`: its `site`, else
+    /// `[uplink] site_label`, else the id of the device serving it.
+    pub fn channel_site<'a>(&'a self, c: &'a Channel) -> &'a str {
+        if !c.site.trim().is_empty() {
+            &c.site
+        } else if !self.uplink.site_label.trim().is_empty() {
+            &self.uplink.site_label
+        } else {
+            self.channel_device_for(c).map_or("", |d| d.id.as_str())
+        }
     }
 
     /// Semantic validation beyond deserialization.
@@ -1659,7 +1907,7 @@ impl Config {
             }
         }
         for c in &self.channel {
-            if !known(&c.device) {
+            if !c.device.is_empty() && !known(&c.device) {
                 return Err(Error::config(format!(
                     "channel '{}' references unknown device '{}'",
                     c.name, c.device
@@ -1667,6 +1915,134 @@ impl Config {
             }
         }
         self.validate_site_coverage()?;
+        self.validate_channels()?;
+        Ok(())
+    }
+
+    /// The `[[channel]]` rules, applied to enabled NBFM channels only: a
+    /// disabled channel is never started, and AM is out of scope (warned about
+    /// and skipped at run time), so neither can fail a load that used to pass.
+    ///
+    /// Per channel: the settings parse (`bandwidth_hz`, `tone`, squelch), the
+    /// serving device resolves and has a centre and a channelizer-legal rate,
+    /// and the frequency is in that device's usable span and off its DC bin
+    /// (both via the channelizer's own `bin_for`). Across channels: no two on
+    /// one device closer than 6.25 kHz, none closer than 12.5 kHz to a control
+    /// candidate of an enabled site on the same device, and (system,
+    /// talkgroup) unique.
+    fn validate_channels(&self) -> Result<()> {
+        use trunkd_p25::dsp::channelizer::{ChannelizerError, PolyphaseChannelizerM2};
+
+        let nbfm = || {
+            self.channel
+                .iter()
+                .filter(|c| c.enabled && c.mode == ChannelMode::Nbfm)
+        };
+        // One filterbank per device, built only to ask it `bin_for`.
+        let mut banks: BTreeMap<&str, PolyphaseChannelizerM2> = BTreeMap::new();
+        // (device id, frequency, channel name) for the spacing checks.
+        let mut placed: Vec<(&str, u64, &str)> = Vec::new();
+        let mut talkgroups: BTreeMap<(&str, u32), &str> = BTreeMap::new();
+
+        for c in nbfm() {
+            c.params()?;
+            let d = self.channel_device_for(c)?;
+            let Some(center) = d.center_frequency else {
+                return Err(Error::config(format!(
+                    "channel '{}': device '{}' has no `center_frequency`",
+                    c.name, d.id
+                )));
+            };
+            if !banks.contains_key(d.id.as_str()) {
+                let bank =
+                    PolyphaseChannelizerM2::new(d.sample_rate, center as f64).map_err(|e| {
+                        Error::config(format!(
+                            "channel '{}': device '{}' cannot be channelized: {e}",
+                            c.name, d.id
+                        ))
+                    })?;
+                banks.insert(d.id.as_str(), bank);
+            }
+            let bank = &banks[d.id.as_str()];
+            match bank.bin_for(c.frequency as f64) {
+                Ok(_) => {}
+                Err(ChannelizerError::DcBin { .. }) => {
+                    return Err(Error::config(format!(
+                        "channel '{}': {} Hz is on device '{}''s capture centre (the DC \
+                         bin, which the channelizer refuses); move the device's \
+                         `center_frequency`",
+                        c.name, c.frequency, d.id
+                    )));
+                }
+                Err(ChannelizerError::FrequencyOutOfBand { .. }) => {
+                    let half = bank.usable_half_span_hz();
+                    return Err(Error::config(format!(
+                        "channel '{}': {} Hz is outside device '{}''s usable span \
+                         {}..={} Hz",
+                        c.name,
+                        c.frequency,
+                        d.id,
+                        (center as f64 - half).max(0.0) as u64,
+                        (center as f64 + half) as u64
+                    )));
+                }
+                Err(e) => {
+                    return Err(Error::config(format!(
+                        "channel '{}' on device '{}': {e}",
+                        c.name, d.id
+                    )));
+                }
+            }
+            let half = u64::from(d.sample_rate) / 2;
+            let guard = span_guard_hz(d.sample_rate);
+            let (edge_lo, edge_hi) = (center.saturating_sub(half), center + half);
+            if c.frequency < edge_lo + guard || c.frequency + guard > edge_hi {
+                tracing::warn!(
+                    channel = %c.name,
+                    device = %d.id,
+                    frequency = c.frequency,
+                    "conventional channel is within the capture's edge guard band; \
+                     the tuner's own filter may attenuate it"
+                );
+            }
+
+            for s in self.site.iter().filter(|s| s.enabled) {
+                if !s.device_ids().contains(&d.id.as_str()) {
+                    continue;
+                }
+                if let Some(cc) = s
+                    .control_frequencies
+                    .iter()
+                    .find(|&&cc| cc.abs_diff(c.frequency) < CHANNEL_CONTROL_SPACING_HZ)
+                {
+                    return Err(Error::config(format!(
+                        "channel '{}' ({} Hz) is within 12.5 kHz of site '{}/{}' \
+                         control frequency {cc} Hz on device '{}': a conventional \
+                         channel cannot share a P25 control channel",
+                        c.name, c.frequency, s.system, s.site, d.id
+                    )));
+                }
+            }
+            if let Some((_, f, other)) = placed.iter().find(|(dev, f, _)| {
+                *dev == d.id.as_str() && f.abs_diff(c.frequency) < CHANNEL_MIN_SPACING_HZ
+            }) {
+                return Err(Error::config(format!(
+                    "channels '{other}' ({f} Hz) and '{}' ({} Hz) on device '{}' are \
+                     closer than 6.25 kHz",
+                    c.name, c.frequency, d.id
+                )));
+            }
+            placed.push((d.id.as_str(), c.frequency, c.name.as_str()));
+
+            let key = (self.channel_system(c), c.talkgroup_id());
+            if let Some(other) = talkgroups.insert(key, c.name.as_str()) {
+                return Err(Error::config(format!(
+                    "channels '{other}' and '{}' both file calls as talkgroup {} in \
+                     system '{}'; give one a different `talkgroup` or `system`",
+                    c.name, key.1, key.0
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1751,6 +2127,14 @@ impl Config {
         Ok(())
     }
 }
+
+/// Two enabled conventional channels on one device must be at least this far
+/// apart (the finest land-mobile raster).
+pub const CHANNEL_MIN_SPACING_HZ: u64 = 6_250;
+
+/// An enabled conventional channel must be at least this far from a control
+/// candidate of an enabled site on the same device (one P25 channel).
+pub const CHANNEL_CONTROL_SPACING_HZ: u64 = 12_500;
 
 /// Guard band excluded from each edge of a capture: 1 % of the sample rate,
 /// never less than one 25 kHz P25 channel.
@@ -2774,6 +3158,391 @@ longitude = -180.0"
             explicit.public_base_url(),
             "https://recorder.example/panel",
             "a trailing slash would double up against the stream path"
+        );
+    }
+
+    // -- conventional channels -------------------------------------------------
+
+    /// Two fictional tuners: VHF at 155.0 MHz and UHF at 460.0 MHz, both
+    /// 2.5 Msps (200 bins, usable ±1.2375 MHz).
+    const TWO_TUNERS: &str = r#"
+        [uplink]
+        system_label = "Example County"
+        site_label = "Example Hill"
+        [[device]]
+        id = "vhf0"
+        backend = "iqfile"
+        path = "v.iq"
+        sample_rate = 2500000
+        center_frequency = 155000000
+        [[device]]
+        id = "uhf0"
+        backend = "iqfile"
+        path = "u.iq"
+        sample_rate = 2500000
+        center_frequency = 460000000
+        "#;
+
+    fn channels(body: &str) -> Result<Config> {
+        Config::from_toml_str(&format!("{TWO_TUNERS}\n{body}"))
+    }
+
+    fn rejects(body: &str, needle: &str) {
+        let err = channels(body).expect_err("rejected").to_string();
+        assert!(err.contains(needle), "{needle:?} not in {err:?}");
+    }
+
+    /// `trunkd check` is `Config::load` + print: a config with channels and no
+    /// `[[site]]` must load.
+    #[test]
+    fn a_channels_only_config_is_valid() {
+        let cfg = channels(
+            r#"
+            [[channel]]
+            name = "Fire Dispatch"
+            system = "Example County Fire"
+            frequency = 154250000
+            tone = "167.9"
+            [[channel]]
+            name = "Public Works"
+            frequency = 460525000
+            tone = "D445N"
+            "#,
+        )
+        .expect("valid");
+        assert!(cfg.site.is_empty());
+        assert_eq!(cfg.enabled_channels(), 2);
+        // Both tuners are started: each serves one channel, picked by span.
+        assert_eq!(cfg.active_device_ids(), vec!["vhf0", "uhf0"]);
+
+        let dir = std::env::temp_dir().join(format!("trunkd-config-chan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("trunkd.toml");
+        std::fs::write(
+            &path,
+            format!("{TWO_TUNERS}\n[[channel]]\nname = \"A\"\nfrequency = 155300000\n"),
+        )
+        .expect("config file");
+        let loaded = Config::load(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        loaded.expect("loads like `trunkd check` loads it");
+    }
+
+    #[test]
+    fn channel_labels_and_talkgroup_default() {
+        let cfg = channels(
+            r#"
+            [[channel]]
+            name = "Fire Dispatch"
+            system = "Example County Fire"
+            site = "Example Ridge"
+            frequency = 154250000
+            talkgroup = 14
+            [[channel]]
+            name = "Ops"
+            frequency = 155400000
+            "#,
+        )
+        .expect("valid");
+        let (fire, ops) = (&cfg.channel[0], &cfg.channel[1]);
+        assert_eq!(cfg.channel_system(fire), "Example County Fire");
+        assert_eq!(cfg.channel_site(fire), "Example Ridge");
+        assert_eq!(fire.talkgroup_id(), 14);
+        // Unset: the uplink labels, and frequency / 1000.
+        assert_eq!(cfg.channel_system(ops), "Example County");
+        assert_eq!(cfg.channel_site(ops), "Example Hill");
+        assert_eq!(ops.talkgroup_id(), 155_400);
+
+        // No uplink site label either: the device id.
+        let mut bare = cfg.clone();
+        bare.uplink.site_label.clear();
+        assert_eq!(bare.channel_site(&bare.channel[1]), "vhf0");
+    }
+
+    #[test]
+    fn channel_device_auto_pick_single_none_ambiguous() {
+        let cfg = channels("[[channel]]\nname = \"A\"\nfrequency = 155300000\n").expect("single");
+        assert_eq!(
+            cfg.channel_device_for(&cfg.channel[0]).expect("picked").id,
+            "vhf0"
+        );
+
+        rejects(
+            "[[channel]]\nname = \"Far\"\nfrequency = 851012500\n",
+            "no device's usable span covers",
+        );
+
+        let third = r#"
+            [[device]]
+            id = "vhf1"
+            backend = "iqfile"
+            path = "w.iq"
+            sample_rate = 2500000
+            center_frequency = 155500000
+            "#;
+        rejects(
+            &format!("{third}\n[[channel]]\nname = \"Both\"\nfrequency = 155300000\n"),
+            "covered by several devices (vhf0, vhf1)",
+        );
+        // Naming the device settles it.
+        channels(&format!(
+            "{third}\n[[channel]]\nname = \"Both\"\ndevice = \"vhf1\"\nfrequency = 155300000\n"
+        ))
+        .expect("explicit device");
+        rejects(
+            "[[channel]]\nname = \"A\"\ndevice = \"nope\"\nfrequency = 155300000\n",
+            "unknown device 'nope'",
+        );
+    }
+
+    #[test]
+    fn a_channel_must_be_in_its_devices_usable_span() {
+        // vhf0 usable span is 155 MHz ± (1.25 MHz − 12.5 kHz).
+        rejects(
+            "[[channel]]\nname = \"Edge\"\ndevice = \"vhf0\"\nfrequency = 156250000\n",
+            "outside device 'vhf0''s usable span 153762500..=156237500 Hz",
+        );
+        channels("[[channel]]\nname = \"Inside\"\ndevice = \"vhf0\"\nfrequency = 156230000\n")
+            .expect("just inside the usable span");
+        // A device with no centre cannot place a channel.
+        let cfg = format!(
+            "{TWO_TUNERS}\n[[device]]\nid = \"nc\"\nbackend = \"iqfile\"\npath = \"n.iq\"\n\
+             sample_rate = 2500000\n[[channel]]\nname = \"A\"\ndevice = \"nc\"\nfrequency = 155300000\n"
+        );
+        assert!(Config::from_toml_str(&cfg)
+            .expect_err("rejected")
+            .to_string()
+            .contains("has no `center_frequency`"));
+    }
+
+    #[test]
+    fn a_channel_on_the_dc_bin_is_rejected() {
+        rejects(
+            "[[channel]]\nname = \"DC\"\nfrequency = 155000000\n",
+            "DC bin",
+        );
+        // Off-grid but straddling the centre bin: still DC, by `bin_for`.
+        rejects(
+            "[[channel]]\nname = \"DC\"\nfrequency = 155007500\n",
+            "DC bin",
+        );
+        channels("[[channel]]\nname = \"Near\"\nfrequency = 155025000\n").expect("two bins off");
+    }
+
+    #[test]
+    fn a_channel_cannot_share_a_control_channel() {
+        let site = r#"
+            [[site]]
+            system = "Example System"
+            site = "Example County"
+            device = "uhf0"
+            control_frequencies = [460500000]
+            "#;
+        rejects(
+            &format!("{site}\n[[channel]]\nname = \"C\"\nfrequency = 460506250\n"),
+            "a conventional channel cannot share a P25 control channel",
+        );
+        // 12.5 kHz away is the next channel, not an overlap.
+        channels(&format!(
+            "{site}\n[[channel]]\nname = \"C\"\nfrequency = 460512500\n"
+        ))
+        .expect("adjacent channel");
+        // A disabled site's candidates do not count.
+        channels(&format!(
+            "{}\n[[channel]]\nname = \"C\"\nfrequency = 460506250\n",
+            site.replace(
+                "device = \"uhf0\"",
+                "device = \"uhf0\"\n            enabled = false"
+            )
+        ))
+        .expect("site disabled");
+    }
+
+    #[test]
+    fn two_channels_closer_than_6_25_khz_are_rejected() {
+        rejects(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\n\
+             [[channel]]\nname = \"B\"\nfrequency = 155305000\n",
+            "closer than 6.25 kHz",
+        );
+        rejects(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\n\
+             [[channel]]\nname = \"B\"\nfrequency = 155300000\ntalkgroup = 9\n",
+            "closer than 6.25 kHz",
+        );
+        channels(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\n\
+             [[channel]]\nname = \"B\"\nfrequency = 155306250\ntalkgroup = 9\n",
+        )
+        .expect("6.25 kHz apart");
+        // A disabled duplicate is left alone.
+        channels(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\n\
+             [[channel]]\nname = \"B\"\nfrequency = 155300000\nenabled = false\n",
+        )
+        .expect("disabled duplicate");
+    }
+
+    #[test]
+    fn system_talkgroup_pairs_are_unique() {
+        rejects(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\ntalkgroup = 1\n\
+             [[channel]]\nname = \"B\"\nfrequency = 155400000\ntalkgroup = 1\n",
+            "both file calls as talkgroup 1 in system 'Example County'",
+        );
+        // An explicit talkgroup can collide with another channel's default.
+        rejects(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\n\
+             [[channel]]\nname = \"B\"\nfrequency = 155400000\ntalkgroup = 155300\n",
+            "talkgroup 155300",
+        );
+        // Different systems, or a disabled twin, are fine.
+        channels(
+            "[[channel]]\nname = \"A\"\nfrequency = 155300000\ntalkgroup = 1\n\
+             [[channel]]\nname = \"B\"\nsystem = \"Example Schools\"\nfrequency = 155400000\n\
+             talkgroup = 1\n\
+             [[channel]]\nname = \"C\"\nfrequency = 155500000\ntalkgroup = 1\nenabled = false\n",
+        )
+        .expect("unique per system");
+    }
+
+    #[test]
+    fn channel_tone_parses() {
+        for tone in [
+            "\"167.9\"",
+            "\"D445N\"",
+            "\"D445I\"",
+            "\"445\"",
+            "\"DCS 445\"",
+            "167.9",
+            "445",
+        ] {
+            let cfg = channels(&format!(
+                "[[channel]]\nname = \"T\"\nfrequency = 155300000\ntone = {tone}\n"
+            ))
+            .unwrap_or_else(|e| panic!("tone {tone}: {e}"));
+            assert!(cfg.channel[0].parsed_tone().expect("parses").is_some());
+        }
+        let cfg = channels("[[channel]]\nname = \"T\"\nfrequency = 155300000\ntone = 167.9\n")
+            .expect("numeric tone");
+        assert_eq!(cfg.channel[0].tone.as_deref(), Some("167.9"));
+        assert_eq!(
+            cfg.channel[0]
+                .params()
+                .expect("params")
+                .tone
+                .map(|t| t.to_string()),
+            Some("167.9".to_owned())
+        );
+        rejects(
+            "[[channel]]\nname = \"T\"\nfrequency = 155300000\ntone = \"150.0\"\n",
+            "channel 'T': tone \"150.0\"",
+        );
+        rejects(
+            "[[channel]]\nname = \"T\"\nfrequency = 155300000\ntone = \"D999N\"\n",
+            "tone",
+        );
+        // No tone: carrier squelch.
+        let cfg = channels("[[channel]]\nname = \"T\"\nfrequency = 155300000\n").expect("valid");
+        assert_eq!(cfg.channel[0].params().expect("params").tone, None);
+    }
+
+    #[test]
+    fn channel_bandwidth_is_12_5_khz_only() {
+        channels("[[channel]]\nname = \"B\"\nfrequency = 155300000\nbandwidth_hz = 12500\n")
+            .expect("12.5 kHz");
+        rejects(
+            "[[channel]]\nname = \"B\"\nfrequency = 155300000\nbandwidth_hz = 25000\n",
+            "channel 'B': 25 kHz channels are not supported yet (bandwidth_hz = 25000); use 12500",
+        );
+        rejects(
+            "[[channel]]\nname = \"B\"\nfrequency = 155300000\nbandwidth_hz = 6250\n",
+            "bandwidth_hz must be 12500 (got 6250)",
+        );
+    }
+
+    #[test]
+    fn channel_squelch_open_must_exceed_close() {
+        rejects(
+            "[[channel]]\nname = \"S\"\nfrequency = 155300000\n\
+             [channel.squelch]\nopen_db = 5.0\nclose_db = 5.0\n",
+            "must be greater than close_db",
+        );
+        let cfg = channels(
+            "[[channel]]\nname = \"S\"\nfrequency = 155300000\ndeemphasis_us = 0\n\
+             [channel.squelch]\nopen_db = 10.0\nclose_db = 6.0\nhang_ms = 1500\n",
+        )
+        .expect("valid");
+        let p = cfg.channel[0].params().expect("params");
+        assert_eq!((p.squelch.open_db, p.squelch.close_db), (10.0, 6.0));
+        assert_eq!(p.squelch.hang_ms, 1500);
+        assert_eq!(p.squelch.attack_ms, 40, "unset fields keep the defaults");
+        assert_eq!(p.deemphasis_us, 0);
+    }
+
+    /// What `trunkd import-sdrtrunk` wrote before conventional channels were
+    /// built: an explicit device, sdrtrunk's four squelch numbers, no labels.
+    #[test]
+    fn legacy_sdrtrunk_squelch_fields_are_accepted_and_ignored() {
+        let cfg = channels(
+            r#"
+            [[channel]]
+            name = "Ops"
+            device = "vhf0"
+            frequency = 155300000
+            mode = "nbfm"
+            enabled = true
+            bandwidth_hz = 12500
+            talkgroup = 1
+
+            [channel.squelch]
+            noise_open = 0.1
+            noise_close = 0.19
+            hysteresis_open = 4
+            hysteresis_close = 6
+            "#,
+        )
+        .expect("legacy squelch still loads");
+        let sq = cfg.channel[0].squelch.expect("kept");
+        assert!(sq.has_legacy_fields());
+        assert_eq!(sq.noise_open, Some(0.1));
+        assert_eq!(
+            sq.params(),
+            trunkd_analog::SquelchParams::default(),
+            "the legacy numbers change nothing"
+        );
+        // And it serializes back the way it came.
+        let out = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(out.contains("noise_open = 0.1"), "{out}");
+        assert!(!out.contains("open_db"), "{out}");
+    }
+
+    /// AM is parsed and skipped at run time, and a disabled channel is never
+    /// started: neither is held to the NBFM rules, so configs that loaded
+    /// before still load.
+    #[test]
+    fn am_and_disabled_channels_are_not_held_to_the_nbfm_rules() {
+        channels(
+            r#"
+            [[channel]]
+            name = "Tower"
+            device = "vhf0"
+            frequency = 118300000
+            mode = "am"
+            bandwidth_hz = 8333
+            [[channel]]
+            name = "Off"
+            device = "uhf0"
+            frequency = 155000000
+            enabled = false
+            tone = "nonsense"
+            "#,
+        )
+        .expect("AM and disabled channels load as before");
+        // The device must still exist, as it always had to.
+        rejects(
+            "[[channel]]\nname = \"Tower\"\ndevice = \"gone\"\nfrequency = 118300000\nmode = \"am\"\n",
+            "unknown device 'gone'",
         );
     }
 }

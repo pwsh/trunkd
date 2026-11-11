@@ -94,7 +94,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for one spectrum POST. Spectrum is a live display posted every
 /// cycle while it is on, and a lost frame costs nothing, so a slow Keyup must
 /// not hold the loop — and the desired-state GET a push is waiting on — for
-/// the full [`HTTP_TIMEOUT`] per frame (review 2026-09-22 §3.4, T-C3).
+/// the full [`HTTP_TIMEOUT`] per frame.
 const SPECTRUM_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// keyup caps a report at 64 tuners; we never POST more, and never parse more
@@ -2904,6 +2904,149 @@ pub(crate) struct TunerStatus {
     /// Set while the tuner's unit is failing and being retried: what failed,
     /// and when it will be tried again. Omitted from the body otherwise.
     pub fault: Option<TunerFault>,
+    /// The conventional `[[channel]]`s this tuner records, in config order.
+    /// Empty on a P25-only tuner, and then omitted from the body entirely, so
+    /// a recorder without channels posts exactly the body it always has.
+    pub channels: Vec<ChannelStatus>,
+}
+
+/// Most conventional channels reported per tuner. Far above any capture's
+/// worth of 12.5 kHz channels a recorder would configure; a cap so the body
+/// stays bounded whatever the config says.
+pub(crate) const MAX_CHANNELS_PER_TUNER: usize = 64;
+
+/// Longest channel name reported, in characters.
+const MAX_CHANNEL_NAME_LEN: usize = 64;
+
+/// One conventional channel's live state, read from the `channel.{i}.*`
+/// gauges its device's DSP thread publishes once a second.
+///
+/// Reported per tuner on the status POST and, flattened with the tuner's key,
+/// as the panel's top-level `channels` list. The static half (name,
+/// frequency, tone, talkgroup) comes from the config; the rest is measured.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ChannelStatus {
+    /// Position among the enabled NBFM channels: the `i` of `channel.{i}.*`.
+    pub index: usize,
+    pub name: String,
+    pub system: String,
+    pub frequency_hz: u64,
+    /// Canonical tone (`"167.9"`, `"D445N"`); `None` is carrier squelch.
+    pub tone: Option<String>,
+    pub talkgroup: u32,
+    /// `closed` | `opening` | `open` | `hang` while the tuner streams;
+    /// `idle` when it does not (stopped, disabled, or its heartbeat is stale).
+    pub state: &'static str,
+    /// Channel power over the tracked noise floor, dB. Liveness-gated.
+    pub snr_db: Option<f64>,
+    /// Channel power after the channel filter, dBFS. Liveness-gated.
+    pub power_dbfs: Option<f64>,
+    /// The tracked noise floor, dBFS. Liveness-gated.
+    pub noise_floor_dbfs: Option<f64>,
+    /// Carrier offset measured during the last call, Hz; `None` before the
+    /// first call of this run.
+    pub offset_hz: Option<f64>,
+    /// Calls kept since the tuner (re)started.
+    pub calls: u64,
+    /// Openings dropped as shorter than `min_call_ms`.
+    pub calls_too_short: u64,
+    /// Carrier openings dropped because the configured tone never arrived.
+    pub tone_mismatch: u64,
+    /// Carrier openings vetoed as noise (energy with no FM structure).
+    pub false_opens: u64,
+    /// When the last call ended, unix ms; `None` before the first.
+    pub last_call_end_ms: Option<i64>,
+}
+
+impl ChannelStatus {
+    /// The wire object. Unmeasured fields are omitted, as on the tuner entry.
+    pub(crate) fn to_json(&self) -> Value {
+        let mut obj = json!({
+            "index": self.index,
+            "name": truncate_chars(&self.name, MAX_CHANNEL_NAME_LEN),
+            "system": truncate_chars(&self.system, MAX_CHANNEL_NAME_LEN),
+            "frequency_hz": self.frequency_hz,
+            "tone": self.tone,
+            "talkgroup": self.talkgroup,
+            "state": self.state,
+            "open": matches!(self.state, "open" | "hang"),
+            "calls": self.calls,
+            "calls_too_short": self.calls_too_short,
+            "tone_mismatch": self.tone_mismatch,
+            "false_opens": self.false_opens,
+        });
+        let map = obj
+            .as_object_mut()
+            .expect("json! of an object literal is an object");
+        for (k, v) in [
+            ("snr_db", self.snr_db),
+            ("power_dbfs", self.power_dbfs),
+            ("noise_floor_dbfs", self.noise_floor_dbfs),
+            ("offset_hz", self.offset_hz),
+        ] {
+            if let Some(v) = v {
+                map.insert(k.to_owned(), json!(v));
+            }
+        }
+        if let Some(t) = self.last_call_end_ms {
+            map.insert("last_call_end_ms".to_owned(), json!(t));
+        }
+        obj
+    }
+}
+
+/// `channel.{i}.state` (see `conventional::state_code`) as its wire name.
+fn channel_state_str(code: u64) -> &'static str {
+    match code {
+        1 => "opening",
+        2 => "open",
+        3 => "hang",
+        _ => "closed",
+    }
+}
+
+/// Read one channel's gauges. `live` is the tuner's stream liveness: a
+/// stopped tuner's channels are `idle` and report no measurement, whatever
+/// the last published gauges say.
+fn gather_channel_status(
+    get: &dyn Fn(&str) -> Option<u64>,
+    c: &ChannelDescriptor,
+    live: bool,
+) -> ChannelStatus {
+    let p = &c.metric_prefix;
+    let num = |name: &str| get(&format!("{p}.{name}")).unwrap_or(0);
+    let float = |name: &str| {
+        live.then(|| get(&format!("{p}.{name}")).map(f64::from_bits))
+            .flatten()
+    };
+    let last_end = num("last_call_end_ms");
+    let calls = num("calls");
+    ChannelStatus {
+        index: c.index,
+        name: c.name.clone(),
+        system: c.system.clone(),
+        frequency_hz: c.frequency_hz,
+        tone: c.tone.clone(),
+        talkgroup: c.talkgroup,
+        state: if live {
+            channel_state_str(num("state"))
+        } else {
+            "idle"
+        },
+        snr_db: float("snr_db"),
+        power_dbfs: float("power_dbfs"),
+        noise_floor_dbfs: float("noise_floor_dbfs"),
+        // A measurement of the last call, not of now: kept while the tuner is
+        // stopped, absent only before anything has been heard.
+        offset_hz: (calls != 0 || last_end != 0)
+            .then(|| get(&format!("{p}.offset_hz")).map(f64::from_bits))
+            .flatten(),
+        calls,
+        calls_too_short: num("calls_too_short"),
+        tone_mismatch: num("tone_mismatch"),
+        false_opens: num("false_opens"),
+        last_call_end_ms: (last_end != 0).then_some(last_end as i64),
+    }
 }
 
 /// One board's persisted frequency correction, as the status report sees it.
@@ -3341,6 +3484,21 @@ pub(crate) fn status_body(
             if let Some(f) = &t.fault {
                 map.insert("fault".to_owned(), f.to_json());
             }
+            // Conventional channels on this tuner. Omitted (not an empty
+            // array) on a P25-only tuner: the field is additive, and a
+            // recorder with no `[[channel]]` posts the body it always has.
+            if !t.channels.is_empty() {
+                map.insert(
+                    "channels".to_owned(),
+                    Value::Array(
+                        t.channels
+                            .iter()
+                            .take(MAX_CHANNELS_PER_TUNER)
+                            .map(ChannelStatus::to_json)
+                            .collect(),
+                    ),
+                );
+            }
             obj
         })
         .collect();
@@ -3643,6 +3801,12 @@ pub(crate) fn gather_tuner_status(
         description.receiver = default_receiver(d.backend, d.driver.as_deref());
     }
 
+    let channels = d
+        .channels
+        .iter()
+        .map(|c| gather_channel_status(&get, c, live && enabled))
+        .collect();
+
     TunerStatus {
         tuner_key: d.id.clone(),
         serial: d.serial.clone(),
@@ -3689,6 +3853,7 @@ pub(crate) fn gather_tuner_status(
         auto_ppm_applied,
         ppm_memory,
         fault,
+        channels,
     }
 }
 
@@ -3713,6 +3878,38 @@ pub(crate) struct TunerDescriptor {
     pub site_metric_prefix: Option<String>,
     /// Operator-entered hardware description from `[[device]]`.
     pub description: TunerDescription,
+    /// The enabled conventional channels this tuner records. Empty for a
+    /// P25-only tuner.
+    pub channels: Vec<ChannelDescriptor>,
+}
+
+/// Static facts of one conventional channel, for the status reports: what
+/// [`ChannelSpec`](crate::pipeline::conventional::ChannelSpec) knows, minus the
+/// engine settings.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChannelDescriptor {
+    pub index: usize,
+    pub name: String,
+    pub system: String,
+    pub frequency_hz: u64,
+    pub tone: Option<String>,
+    pub talkgroup: u32,
+    /// `channel.{index}`.
+    pub metric_prefix: String,
+}
+
+impl From<&crate::pipeline::conventional::ChannelSpec> for ChannelDescriptor {
+    fn from(s: &crate::pipeline::conventional::ChannelSpec) -> Self {
+        ChannelDescriptor {
+            index: s.index,
+            name: s.name.clone(),
+            system: s.system_label.clone(),
+            frequency_hz: s.frequency_hz,
+            tone: s.tone.clone(),
+            talkgroup: s.talkgroup,
+            metric_prefix: s.metric_prefix.clone(),
+        }
+    }
 }
 
 /// How the control thread reaches keyup.
@@ -5873,6 +6070,206 @@ mod tests {
         assert_eq!(t["applied_version"], 4);
     }
 
+    /// A P25-only recorder (no `[[channel]]`) gathered from a full set of
+    /// live gauges, through the very builders the control loop runs.
+    fn p25_only_body() -> Value {
+        let m = trunkd_core::Metrics::new();
+        let now = 1_788_499_730_000_i64;
+        m.gauge("device.ctrl.stream_beat_ms").set(now as u64);
+        m.gauge("device.ctrl.overflow_per_s").set(0);
+        m.gauge("device.ctrl.rssi_dbfs").set_f64(-24.5);
+        m.gauge("device.ctrl.site_stats_seen").set(1);
+        m.gauge("device.ctrl.tsbk_rate").set_f64(15.25);
+        m.gauge("device.ctrl.snr_valid").set(1);
+        m.gauge("device.ctrl.snr_db").set_f64(18.5);
+        m.gauge("device.ctrl.noise_floor_dbfs").set_f64(-61.0);
+        m.gauge("site.0.control_frequency_hz").set(851_050_000);
+        m.gauge("site.0.nac").set(0x34);
+        m.gauge("site.0.pool_in_use").set(3);
+        m.gauge("site.0.pool_size").set(20);
+        m.gauge("site.0.active_calls").set(2);
+        let t = gather_tuner_status(&m.snapshot(), &descriptor(), Some(&applied_snapshot()), now);
+        status_body(
+            "rec-01",
+            &Station::default(),
+            &Counters::default(),
+            &[t],
+            &no_hold(),
+            None,
+            &EventLogReport::default(),
+        )
+    }
+
+    /// The tuner-status POST of a recorder with no conventional channels, byte
+    /// for byte as it was before channels existed (captured on the commit that
+    /// precedes them). Keyup ignores unknown fields, but a P25-only recorder
+    /// must not even send new ones.
+    #[test]
+    fn a_p25_only_status_post_is_byte_identical_to_the_one_before_channels() {
+        let got = serde_json::to_string(&p25_only_body()).expect("serialises");
+        let want = P25_ONLY_STATUS_GOLDEN.replace("@VERSION@", env!("CARGO_PKG_VERSION"));
+        assert_eq!(got, want);
+    }
+
+    fn channel_descriptor(index: usize, tone: Option<&str>) -> ChannelDescriptor {
+        ChannelDescriptor {
+            index,
+            name: format!("Channel {index}"),
+            system: "Example County".into(),
+            frequency_hz: 154_000_000 + index as u64 * 25_000,
+            tone: tone.map(str::to_owned),
+            talkgroup: 154_000 + index as u32 * 25,
+            metric_prefix: format!("channel.{index}"),
+        }
+    }
+
+    /// A tuner carrying conventional channels reports each one off its
+    /// `channel.{i}.*` gauges, as an additive `channels` array on its entry.
+    #[test]
+    fn a_tuner_with_channels_reports_them_from_their_gauges() {
+        let m = trunkd_core::Metrics::new();
+        let now = 1_788_499_730_000_i64;
+        m.gauge("device.ctrl.stream_beat_ms").set(now as u64);
+        m.gauge("channel.0.state").set(3);
+        m.gauge("channel.0.open").set(1);
+        m.gauge("channel.0.snr_db").set_f64(24.25);
+        m.gauge("channel.0.power_dbfs").set_f64(-40.0);
+        m.gauge("channel.0.noise_floor_dbfs").set_f64(-64.25);
+        m.gauge("channel.0.offset_hz").set_f64(-120.5);
+        m.gauge("channel.0.calls").set(9);
+        m.gauge("channel.0.calls_too_short").set(2);
+        m.gauge("channel.0.tone_mismatch").set(3);
+        m.gauge("channel.0.false_opens").set(4);
+        m.gauge("channel.0.last_call_end_ms").set(1_788_499_725_000);
+        m.gauge("channel.1.state").set(1);
+        let d = TunerDescriptor {
+            channels: vec![
+                channel_descriptor(0, Some("167.9")),
+                channel_descriptor(1, None),
+            ],
+            ..descriptor()
+        };
+        let t = gather_tuner_status(&m.snapshot(), &d, Some(&applied_snapshot()), now);
+        let body = status_body(
+            "rec-01",
+            &Station::default(),
+            &Counters::default(),
+            &[t],
+            &no_hold(),
+            None,
+            &EventLogReport::default(),
+        );
+        let ch = &body["tuners"][0]["channels"];
+        assert_eq!(
+            ch[0],
+            json!({
+                "index": 0, "name": "Channel 0", "system": "Example County",
+                "frequency_hz": 154_000_000_u64, "tone": "167.9", "talkgroup": 154_000,
+                "state": "hang", "open": true, "snr_db": 24.25, "power_dbfs": -40.0,
+                "noise_floor_dbfs": -64.25, "offset_hz": -120.5, "calls": 9,
+                "calls_too_short": 2, "tone_mismatch": 3, "false_opens": 4,
+                "last_call_end_ms": 1_788_499_725_000_i64,
+            })
+        );
+        // Carrier squelch, never a call yet: `tone` is null, no offset or
+        // last-call time is invented.
+        assert_eq!(ch[1]["tone"], Value::Null);
+        assert_eq!(ch[1]["state"], "opening");
+        assert_eq!(ch[1]["open"], false);
+        assert!(ch[1].get("offset_hz").is_none(), "{ch}");
+        assert!(ch[1].get("last_call_end_ms").is_none(), "{ch}");
+        // Everything else on the body is untouched: removing the field gives
+        // back the P25-only document.
+        let mut stripped = body.clone();
+        stripped["tuners"][0]
+            .as_object_mut()
+            .expect("a tuner object")
+            .remove("channels");
+        let mut p25 = p25_only_body();
+        // The golden fixture seeds signal-quality gauges this one does not.
+        for k in ["rssi_dbfs", "snr_db", "noise_floor_dbfs"] {
+            p25["tuners"][0].as_object_mut().expect("tuner").remove(k);
+        }
+        p25["tuners"][0]["tsbk_rate"] = json!(0.0);
+        for k in [
+            "control_hz",
+            "nac",
+            "pool_in_use",
+            "pool_size",
+            "calls_active",
+        ] {
+            p25["tuners"][0][k] = json!(0);
+        }
+        p25["tuners"][0]["locked"] = json!(false);
+        assert_eq!(stripped, p25);
+    }
+
+    /// A stopped or disabled tuner's channels are `idle` and measure nothing,
+    /// whatever its last published gauges say; the counters and the last
+    /// call's offset are history, and stay.
+    #[test]
+    fn a_stale_tuner_reports_its_channels_idle_and_unmeasured() {
+        let m = trunkd_core::Metrics::new();
+        let now = 1_788_499_730_000_i64;
+        m.gauge("device.ctrl.stream_beat_ms")
+            .set((now - 60_000) as u64);
+        m.gauge("channel.0.state").set(2);
+        m.gauge("channel.0.snr_db").set_f64(24.0);
+        m.gauge("channel.0.offset_hz").set_f64(80.0);
+        m.gauge("channel.0.calls").set(5);
+        let d = TunerDescriptor {
+            channels: vec![channel_descriptor(0, Some("D445N"))],
+            ..descriptor()
+        };
+        let t = gather_tuner_status(&m.snapshot(), &d, Some(&applied_snapshot()), now);
+        let c = &t.channels[0];
+        assert_eq!(c.state, "idle");
+        assert_eq!(c.snr_db, None);
+        assert_eq!(c.power_dbfs, None);
+        assert_eq!(c.offset_hz, Some(80.0));
+        assert_eq!(c.calls, 5);
+
+        // Live but disabled by keyup: idle too.
+        m.gauge("device.ctrl.stream_beat_ms").set(now as u64);
+        let mut a = applied_snapshot();
+        a.config.enabled = false;
+        let t = gather_tuner_status(&m.snapshot(), &d, Some(&a), now);
+        assert_eq!(t.channels[0].state, "idle");
+    }
+
+    #[test]
+    fn the_channels_array_is_capped_and_names_are_truncated() {
+        let t = TunerStatus {
+            tuner_key: "ctrl".into(),
+            channels: (0..MAX_CHANNELS_PER_TUNER + 3)
+                .map(|i| ChannelStatus {
+                    index: i,
+                    name: "n".repeat(MAX_CHANNEL_NAME_LEN + 10),
+                    state: "closed",
+                    ..ChannelStatus::default()
+                })
+                .collect(),
+            ..TunerStatus::default()
+        };
+        let body = status_body(
+            "i",
+            &Station::default(),
+            &Counters::default(),
+            &[t],
+            &no_hold(),
+            None,
+            &EventLogReport::default(),
+        );
+        let ch = body["tuners"][0]["channels"].as_array().expect("channels");
+        assert_eq!(ch.len(), MAX_CHANNELS_PER_TUNER);
+        assert_eq!(
+            ch[0]["name"].as_str().map(|n| n.chars().count()),
+            Some(MAX_CHANNEL_NAME_LEN)
+        );
+    }
+
+    const P25_ONLY_STATUS_GOLDEN: &str = r#"{"capabilities":{"recorder":{"restart_on":[]}},"counters":{"calls_discarded_empty":0,"calls_ended":0,"calls_skipped_by_policy":0,"calls_started":0,"calls_tdma_refused":0,"disk_free_bytes":0,"failed":0,"spool_bytes":0,"spooled":0,"unit_calls_ended":0,"unit_calls_started":0,"uploaded":0},"event_log":{"archive":false,"last_archived":null,"last_error":null,"last_written_at":null,"pending":0,"source":"config"},"instance_id":"rec-01","recorder_version":"@VERSION@","tuners":[{"agc":null,"amp":false,"applied_version":4,"auto_ppm":true,"auto_ppm_limit":10.0,"backend":"hackrf","bandwidth_hz":null,"calls_active":2,"capabilities":{"restart_on":["role","site","site_id","center_frequency","bands","enabled","ppm","auto_ppm","auto_ppm_limit","data_follow","remote_grants","control_frequencies","sample_rate","lna_db","vga_db","amp"],"runtime_gain":false,"runtime_ppm":false},"center_hz":855500000,"clock_error_ms":0,"clock_resyncs":0,"clock_trim_ms":0,"control_frequencies":[],"control_hz":851050000,"data_follow":false,"description":{"receiver":"HackRF One"},"enabled":true,"gain":null,"gain_elements":[],"gains":{},"last_clock_resync_ms":0,"lna_db":24,"locked":true,"nac":52,"noise_floor_dbfs":-61.0,"overflow_per_s":0,"overrides":[],"pool_in_use":3,"pool_size":20,"ppm":0.0,"ppm_memory":null,"remote_grants":false,"role":"control","rssi_dbfs":-24.5,"rx_port":null,"sample_rate":20000000,"serial":null,"settings":{},"site":"Central","site_id":"7","snr_db":18.5,"span_hz":19975000,"spectrum":false,"stream_gaps":0,"tsbk_rate":15.25,"tuner_key":"ctrl","vga_db":20}],"uplink":{"circuit_open":false,"quarantined":0,"source":"config","spool_bytes":0,"spool_only":false,"spooled_calls":0,"spooled_on_pressure":0,"stream":{"connected":false,"enabled":true,"last_error":null,"last_notify_at":null,"reconnects":0,"since":null},"url":"http://keyup.example/api/call-upload"}}"#;
+
     #[test]
     fn recorder_version_is_the_software_version_string() {
         // keyup's contract types recorder_version as a string (the recorder software
@@ -5960,6 +6357,7 @@ mod tests {
             site_label: Some("Central".into()),
             site_metric_prefix: Some("site.0".into()),
             description: TunerDescription::default(),
+            channels: Vec::new(),
         }
     }
 
@@ -6231,7 +6629,7 @@ mod tests {
         assert_eq!(body["counters"]["calls_started"], 12);
         // The traffic this recorder heard and deliberately did not record.
         assert_eq!(body["counters"]["calls_skipped_by_policy"], 4);
-        // Phase 2 calls heard and not followed (T-D1).
+        // Phase 2 calls heard and not followed.
         assert_eq!(body["counters"]["calls_tdma_refused"], 6);
         assert_eq!(body["counters"]["calls_discarded_empty"], 1);
         assert_eq!(body["counters"]["unit_calls_started"], 2);
@@ -7128,7 +7526,7 @@ mod tests {
         fields
     }
 
-    /// Review 2026-09-22, C7: an entry refused as a whole is never acted on,
+    /// An entry refused as a whole is never acted on,
     /// so keyup sends it on every poll (≈8,600 times a day) and it used to be
     /// warned about each time. Now: one warning per (tuner, version, field),
     /// debug after, the rejection reported on every status until a newer
@@ -8401,6 +8799,7 @@ mod tests {
             site_label: None,
             site_metric_prefix: None,
             description: TunerDescription::default(),
+            channels: Vec::new(),
         }
     }
 

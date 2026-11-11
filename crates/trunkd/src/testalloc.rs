@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Test-only allocation counting (review 2026-09-22 §3.2, T-C3).
+//! Test-only allocation counting.
 //!
 //! The unit-test binary runs on a global allocator that counts every
 //! allocation and reallocation made **by the calling thread**, so a test can
