@@ -124,6 +124,11 @@ jobs:
             # The systemd unit and its install notes (docs/install-linux.md).
             mkdir -p "dist/$name/systemd"
             cp scripts/systemd/trunkd.service scripts/systemd/README.md "dist/$name/systemd/"
+            # The unattended updater and its timer (scripts/linux/README.md).
+            mkdir -p "dist/$name/update"
+            cp scripts/linux/update-trunkd.sh scripts/linux/trunkd-update.service \
+               scripts/linux/trunkd-update.timer scripts/linux/update.conf.example \
+               scripts/linux/README.md "dist/$name/update/"
           fi
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new trunkd once a day
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=30min
+# Run at boot if the box was off at 04:30.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

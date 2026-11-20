@@ -1,0 +1,30 @@
+# /etc/trunkd/update.conf - settings for update-trunkd.sh (shell syntax).
+# Every line is optional; the values shown are the defaults.
+
+# Where updates come from:
+#   release  the latest published GitHub release of GITHUB_REPO (prebuilt,
+#            checksum-verified; drafts and pre-releases are ignored)
+#   git      a git ref of GIT_URL, built on this box with cargo
+SOURCE=release
+GITHUB_REPO=pwsh/trunkd
+
+# SOURCE=git only
+GIT_URL=https://github.com/pwsh/trunkd.git
+GIT_REF=main            # a branch, or latest-tag for the highest v* tag
+TRACK=version           # version: build when Cargo.toml's version goes up
+                        # commit:  build every new commit on GIT_REF
+RUN_TESTS=1             # cargo test before installing
+BUILD_JOBS=2            # cargo -j; the recorder shares these CPUs
+#CARGO=/root/.cargo/bin/cargo
+
+# Stay on one series, e.g. PIN=0.2 takes 0.2.x but not 0.3.0. Empty = any newer.
+PIN=
+
+# The install being updated
+BIN=/usr/local/bin/trunkd
+SERVICE=trunkd
+TRUNKD_CONFIG=/etc/trunkd/trunkd.toml
+RUN_AS=trunkd
+LOCK_TIMEOUT=120        # seconds for every site tuner to lock after the restart
+#PANEL_URL=http://127.0.0.1:8080   # default: loopback on the [server] bind port
+STATE_DIR=/var/lib/trunkd-update

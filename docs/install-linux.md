@@ -182,6 +182,35 @@ New config keys come with defaults, so an existing file keeps working; read `CHA
 anything that changed meaning.
 `/about` on the panel shows which build is running ([panel.md](panel.md#about--diagnostics-about-apiabout)).
 
+### Automatic updates
+
+[`scripts/linux/update-trunkd.sh`](../scripts/linux/update-trunkd.sh) and its daily timer do the
+same unattended. The default source is the latest published GitHub release (a checksum-verified
+binary, nothing compiled on the box). The other source is a git ref built locally, run when its
+`Cargo.toml` version goes up or on every new commit. Every run checks that the new binary
+accepts the live config, then restarts the service and waits for the site tuners to lock. If
+they do not lock, it rolls back to the previous binary.
+Install and settings: [scripts/linux/README.md](../scripts/linux/README.md).
+
+### Reaching the panel on a headless box or container
+
+The panel binds to loopback by default. To open it from another machine, either tunnel it
+(`ssh -L 8080:127.0.0.1:8080 <host>`, then browse `http://127.0.0.1:8080`) or put it on the
+LAN with a token:
+
+```toml
+[server]
+enabled    = true
+bind       = "0.0.0.0:8080"
+tokens     = ["<long random string>"]            # openssl rand -hex 24
+public_url = "http://recorder.example.lan:8080"  # the name you browse to
+```
+
+`public_url` is needed when you reach the panel by a DNS name rather than an IP: the panel's
+host and origin checks only accept the bind address and that URL
+([panel.md](panel.md)). Paste the token into the page's token box once; the browser keeps it.
+`bind` changes need a restart (`systemctl restart trunkd`).
+
 ## Where to go next
 
 * [configuration.md](configuration.md) — every table in the config file.

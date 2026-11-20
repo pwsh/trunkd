@@ -1,0 +1,21 @@
+# One update run: see update-trunkd.sh. Started by trunkd-update.timer, or by
+# hand with `systemctl start trunkd-update` (follow it with journalctl -u trunkd-update -f).
+[Unit]
+Description=Update trunkd from a GitHub release or a local build
+Documentation=https://github.com/pwsh/trunkd/blob/main/scripts/linux/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it replaces /usr/local/bin/trunkd and restarts trunkd.service.
+ExecStart=/usr/local/sbin/update-trunkd.sh
+# 3 = another run already holds the lock; not a failure.
+SuccessExitStatus=3
+# A SOURCE=git build with tests can take a while on a small box.
+TimeoutStartSec=2h
+# Keep a local build out of the live recorder's way.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20
+Environment=HOME=/root

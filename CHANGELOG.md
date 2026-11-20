@@ -5,6 +5,15 @@ All notable changes to trunkd are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Until 1.0, minor versions may
 change configuration or behaviour; the entry says how.
 
+## [Unreleased]
+
+- `scripts/linux/update-trunkd.sh` with a systemd service and daily timer: unattended
+  updates on Linux, from the latest published GitHub release (checksum-verified) or a git ref
+  built locally. Triggered by a version bump or by every new commit. Each run pre-flights the
+  live config with the new binary, verifies that the site tuners lock after the restart, and
+  rolls back if they do not. See `scripts/linux/README.md`.
+- docs/install-linux.md: reaching the panel on a headless box or container.
+
 ## [0.2.2] - 2026-11-11
 
 - Direct Broadcastify Calls upload no longer sends conventional `[[channel]]`
