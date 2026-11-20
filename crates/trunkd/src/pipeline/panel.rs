@@ -55,7 +55,7 @@ use tiny_http::{Header, Method, Response};
 
 use trunkd_supervisor::{ComponentState, UnitStatus};
 
-use crate::config::{Config, Station};
+use crate::config::{Config, PanelAuth, Station};
 use crate::pipeline::control::{
     gather_counters, gather_tuner_status, status_body, uplink_report, DesiredState,
     RecorderControl, TunerDescriptor, MAX_TUNERS,
@@ -82,6 +82,8 @@ pub(crate) struct PanelState {
     pub units: Vec<UnitStatus>,
     /// Accepted bearer tokens; empty means "reads open, mutations loopback".
     pub tokens: Vec<String>,
+    /// `[server] auth`: which requests need one of those tokens.
+    pub auth: PanelAuth,
     /// Which browser `Origin`s may drive a mutation: the panel's own.
     pub origins: OriginPolicy,
     /// This instance's resolved id.
@@ -534,7 +536,7 @@ pub(crate) fn run(addr: &str, mut state: PanelState, stop: Arc<AtomicBool>) {
     }
     tracing::info!(
         bind = %bound.map(|a| a.to_string()).unwrap_or_else(|| addr.to_owned()),
-        auth = if tokens_configured(&state.tokens) { "bearer-token" } else { "loopback-mutations" },
+        auth = state.auth.effective(&state.tokens).as_str(),
         "local control panel listening"
     );
     serve(listener, Arc::new(state), stop, Limits::PANEL);
@@ -1411,9 +1413,9 @@ mod devices {
 /// Why an `/api/*` request was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Denial {
-    /// Tokens are configured and this request did not present a good one.
+    /// This request needs a token and did not present a good one.
     NeedsToken,
-    /// No tokens are configured, so a mutation must come from loopback.
+    /// A mutation from a non-loopback peer under the `loopback` rule.
     LoopbackOnly,
 }
 
@@ -1438,21 +1440,26 @@ enum Denial {
 /// this is the second line, for a `Config` built any other way — `tokens =
 /// [""]` must never mean "every request with an empty bearer is in".
 fn auth_check(
+    auth: PanelAuth,
     mutation: bool,
     presented: Option<&str>,
     peer: Option<std::net::IpAddr>,
     tokens: &[String],
 ) -> Result<(), Denial> {
-    if tokens_configured(tokens) {
-        return match presented {
-            Some(t) if token_accepted(t, tokens) => Ok(()),
-            _ => Err(Denial::NeedsToken),
-        };
-    }
-    if !mutation || peer.is_some_and(|ip| ip.is_loopback()) {
-        Ok(())
-    } else {
-        Err(Denial::LoopbackOnly)
+    let token_ok = || match presented {
+        // `token_accepted` never matches against a blank list, so `token` or
+        // `changes` with no tokens refuses rather than opening up.
+        Some(t) if tokens_configured(tokens) && token_accepted(t, tokens) => Ok(()),
+        _ => Err(Denial::NeedsToken),
+    };
+    match auth.effective(tokens) {
+        PanelAuth::Token => token_ok(),
+        PanelAuth::Changes if mutation => token_ok(),
+        PanelAuth::Changes => Ok(()),
+        PanelAuth::None => Ok(()),
+        // `Loopback`, and `Auto` (which `effective` never returns).
+        _ if !mutation || peer.is_some_and(|ip| ip.is_loopback()) => Ok(()),
+        _ => Err(Denial::LoopbackOnly),
     }
 }
 
@@ -1465,6 +1472,7 @@ fn authorize(
 ) -> Option<Response<std::io::Cursor<Vec<u8>>>> {
     let presented = bearer(rq);
     let outcome = auth_check(
+        state.auth,
         method != &Method::Get,
         presented.as_deref(),
         rq.remote_addr().map(|a| a.ip()),
@@ -1475,15 +1483,21 @@ fn authorize(
         Err(Denial::NeedsToken) => Some(json_response(
             401,
             &json!({
-                "error": "server.tokens is set: every /api/ request needs \
-                          Authorization: Bearer <token>"
+                "error": if state.auth.effective(&state.tokens) == PanelAuth::Changes {
+                    "[server] auth = \"changes\": changes need Authorization: Bearer <token> \
+                     (enter it in the panel's token box)"
+                } else {
+                    "server.tokens is set: every /api/ request needs \
+                     Authorization: Bearer <token>"
+                }
             }),
         )),
         Err(Denial::LoopbackOnly) => Some(json_response(
             403,
             &json!({
-                "error": "server.tokens is empty: mutations are accepted from loopback only. \
-                          Set server.tokens to allow them from the network."
+                "error": "mutations are accepted from loopback only. Set server.tokens \
+                          (and auth = \"changes\" to keep reads open), or auth = \"none\", \
+                          to allow them from the network."
             }),
         )),
     }
@@ -1804,6 +1818,7 @@ fn monitor_stream(rq: &Request, state: &PanelState, conn: &mut Conn) {
     // presented; with none set, reads are open.
     let presented = bearer(rq).or_else(|| query_param(&query, "token"));
     if auth_check(
+        state.auth,
         false,
         presented.as_deref(),
         rq.remote_addr().map(|a| a.ip()),
@@ -1963,6 +1978,11 @@ mod tests {
         .expect("a valid device")
     }
 
+    thread_local! {
+        /// The `auth` rule the next `Panel::build` on this thread uses.
+        static TEST_AUTH: std::cell::Cell<PanelAuth> = const { std::cell::Cell::new(PanelAuth::Auto) };
+    }
+
     /// A panel bound to an ephemeral port, serving on its own thread.
     struct Panel {
         base: String,
@@ -2037,6 +2057,14 @@ control_frequencies = [851050000]
     impl Panel {
         fn start(tokens: Vec<String>) -> Panel {
             Panel::build(tokens, false, None, Vec::new())
+        }
+
+        /// A panel with an explicit `[server] auth` rule.
+        fn start_with_auth(tokens: Vec<String>, auth: PanelAuth) -> Panel {
+            TEST_AUTH.with(|a| a.set(auth));
+            let panel = Panel::build(tokens, false, None, Vec::new());
+            TEST_AUTH.with(|a| a.set(PanelAuth::Auto));
+            panel
         }
 
         /// A panel whose one tuner also records conventional channels.
@@ -2150,6 +2178,7 @@ control_frequencies = [851050000]
                 desired: desired.clone(),
                 units: Vec::new(),
                 tokens,
+                auth: TEST_AUTH.with(std::cell::Cell::get),
                 origins: OriginPolicy::new(&cfg.server),
                 instance_id: "panel-test".into(),
                 station: Station::default(),
@@ -3357,20 +3386,29 @@ control_frequencies = [851050000]
         // in which an empty bearer opens everything.
         let blank = ["".to_owned()];
         assert_eq!(
-            auth_check(true, Some(""), Some(lan), &blank),
+            auth_check(PanelAuth::Auto, true, Some(""), Some(lan), &blank),
             Err(Denial::LoopbackOnly)
         );
         assert_eq!(
-            auth_check(true, Some("   "), Some(lan), &["  ".to_owned()]),
+            auth_check(
+                PanelAuth::Auto,
+                true,
+                Some("   "),
+                Some(lan),
+                &["  ".to_owned()]
+            ),
             Err(Denial::LoopbackOnly)
         );
         // Beside a real token, the blank one matches nothing.
         let mixed = ["".to_owned(), "s3cret".to_owned()];
         assert_eq!(
-            auth_check(false, Some(""), Some(lan), &mixed),
+            auth_check(PanelAuth::Auto, false, Some(""), Some(lan), &mixed),
             Err(Denial::NeedsToken)
         );
-        assert_eq!(auth_check(true, Some("s3cret"), Some(lan), &mixed), Ok(()));
+        assert_eq!(
+            auth_check(PanelAuth::Auto, true, Some("s3cret"), Some(lan), &mixed),
+            Ok(())
+        );
 
         // Over the wire, `Authorization: Bearer ` with nothing after it.
         let panel = Panel::start(mixed.to_vec());
@@ -3595,18 +3633,21 @@ control_frequencies = [851050000]
         let none: &[String] = &[];
 
         assert_eq!(
-            auth_check(false, None, Some(lan), none),
+            auth_check(PanelAuth::Auto, false, None, Some(lan), none),
             Ok(()),
             "reads open"
         );
         assert_eq!(
-            auth_check(true, None, Some(lan), none),
+            auth_check(PanelAuth::Auto, true, None, Some(lan), none),
             Err(Denial::LoopbackOnly),
             "a LAN restart with no token configured is refused"
         );
-        assert_eq!(auth_check(true, None, Some(local), none), Ok(()));
         assert_eq!(
-            auth_check(true, None, None, none),
+            auth_check(PanelAuth::Auto, true, None, Some(local), none),
+            Ok(())
+        );
+        assert_eq!(
+            auth_check(PanelAuth::Auto, true, None, None, none),
             Err(Denial::LoopbackOnly),
             "an unknown peer is not loopback"
         );
@@ -3614,10 +3655,102 @@ control_frequencies = [851050000]
         // With tokens set, the peer address stops mattering in either direction.
         let tokens = ["s3cret".to_owned()];
         assert_eq!(
-            auth_check(false, None, Some(local), &tokens),
+            auth_check(PanelAuth::Auto, false, None, Some(local), &tokens),
             Err(Denial::NeedsToken)
         );
-        assert_eq!(auth_check(true, Some("s3cret"), Some(lan), &tokens), Ok(()));
+        assert_eq!(
+            auth_check(PanelAuth::Auto, true, Some("s3cret"), Some(lan), &tokens),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn auth_changes_opens_reads_and_keeps_a_token_on_changes() {
+        let lan: std::net::IpAddr = "192.168.1.20".parse().expect("an address");
+        let local: std::net::IpAddr = "127.0.0.1".parse().expect("an address");
+        let tokens = ["s3cret".to_owned()];
+        let a = PanelAuth::Changes;
+
+        assert_eq!(
+            auth_check(a, false, None, Some(lan), &tokens),
+            Ok(()),
+            "reads open"
+        );
+        assert_eq!(
+            auth_check(a, true, None, Some(lan), &tokens),
+            Err(Denial::NeedsToken)
+        );
+        assert_eq!(
+            auth_check(a, true, None, Some(local), &tokens),
+            Err(Denial::NeedsToken),
+            "loopback is no substitute for the token"
+        );
+        assert_eq!(
+            auth_check(a, true, Some("wrong"), Some(lan), &tokens),
+            Err(Denial::NeedsToken)
+        );
+        assert_eq!(
+            auth_check(a, true, Some("s3cret"), Some(lan), &tokens),
+            Ok(())
+        );
+        // A Config built without validation: no tokens must refuse, never open.
+        assert_eq!(
+            auth_check(a, true, Some(""), Some(lan), &[]),
+            Err(Denial::NeedsToken)
+        );
+        assert_eq!(
+            auth_check(PanelAuth::Token, false, None, Some(lan), &[]),
+            Err(Denial::NeedsToken)
+        );
+    }
+
+    #[test]
+    fn auth_none_opens_everything_and_loopback_ignores_tokens() {
+        let lan: std::net::IpAddr = "192.168.1.20".parse().expect("an address");
+        let tokens = ["s3cret".to_owned()];
+
+        for t in [&tokens[..], &[]] {
+            assert_eq!(
+                auth_check(PanelAuth::None, false, None, Some(lan), t),
+                Ok(())
+            );
+            assert_eq!(
+                auth_check(PanelAuth::None, true, None, Some(lan), t),
+                Ok(())
+            );
+            assert_eq!(auth_check(PanelAuth::None, true, None, None, t), Ok(()));
+        }
+        // `loopback` is the no-token rule even with tokens configured.
+        assert_eq!(
+            auth_check(PanelAuth::Loopback, false, None, Some(lan), &tokens),
+            Ok(())
+        );
+        assert_eq!(
+            auth_check(
+                PanelAuth::Loopback,
+                true,
+                Some("s3cret"),
+                Some(lan),
+                &tokens
+            ),
+            Err(Denial::LoopbackOnly)
+        );
+    }
+
+    #[test]
+    fn auth_changes_over_http_reads_without_and_refuses_changes_without_a_token() {
+        let panel = Panel::start_with_auth(vec!["s3cret".into()], PanelAuth::Changes);
+        let (status, _) = panel.get("/api/status", None);
+        assert_eq!(status, 200, "reads open under auth = changes");
+        let (status, body) = panel.post("/api/uplink", None);
+        assert_eq!(status, 401, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("changes need"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -3724,7 +3857,7 @@ control_frequencies = [851050000]
         let lan: std::net::IpAddr = "192.168.1.20".parse().expect("an address");
         let none: &[String] = &[];
         assert_eq!(
-            auth_check(true, None, Some(lan), none),
+            auth_check(PanelAuth::Auto, true, None, Some(lan), none),
             Err(Denial::LoopbackOnly),
             "a LAN hold with no token configured is refused"
         );

@@ -211,6 +211,10 @@ host and origin checks only accept the bind address and that URL
 ([panel.md](panel.md)). Paste the token into the page's token box once; the browser keeps it.
 `bind` changes need a restart (`systemctl restart trunkd`).
 
+To keep the status readable without a token and ask for one only when a button is pressed, add
+`auth = "changes"`. To drop the token for buttons too, on a network you trust, use `auth = "none"`
+([panel.md](panel.md#security)).
+
 ## Where to go next
 
 * [configuration.md](configuration.md) — every table in the config file.

@@ -403,7 +403,7 @@ pub fn run_once_with_reload(
         panel: cfg.server.enabled.then(|| control::PanelLink {
             base_url: cfg.server.public_base_url(),
             live_audio: cfg.server.live_audio,
-            token_required: !cfg.server.tokens.is_empty(),
+            token_required: cfg.server.auth.reads_need_token(&cfg.server.tokens),
             hub: monitor.clone(),
         }),
     };
@@ -548,6 +548,7 @@ pub fn run_once_with_reload(
             // interfere with the lifecycle it is reporting on.
             units: handles.iter().map(|h| h.status()).collect(),
             tokens: cfg.server.tokens.clone(),
+            auth: cfg.server.auth,
             // The port is the configured one until `panel::run` binds and
             // replaces it with the real one.
             origins: crate::pipeline::panel::OriginPolicy::new(&cfg.server),

@@ -283,6 +283,7 @@ Local options. Nothing here is sent anywhere except where it says so; what it co
 | `enabled` | `false` | Serve the local web panel ([panel.md](panel.md)). |
 | `bind` | `"127.0.0.1:8080"` | Panel address. Loopback by default; `0.0.0.0:8080` exposes it, and then you should set `tokens`. |
 | `tokens` | `[]` | Bearer tokens for the panel API. |
+| `auth` | `"auto"` | Which panel requests need a token. `auto`: `token` if `tokens` is set, else `loopback`. `token`: all API requests. `changes`: buttons only, reads open. `loopback`: reads open, buttons from the box itself only. `none`: no token at all. Details: [panel.md](panel.md#security). |
 | `live_audio` | `false` | Opt-in live audio monitor stream. |
 | `public_url` | derived from `bind` | How Keyup should link to this panel, e.g. `http://192.0.2.10:8080`. |
 | `log_level` | `"info"` | `error`, `warn`, `info`, `debug` or `trace`. `RUST_LOG` wins. |

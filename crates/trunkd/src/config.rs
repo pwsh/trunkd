@@ -438,6 +438,58 @@ fn default_min_voice_frames() -> u32 {
     1
 }
 
+/// `[server] auth` — which panel requests need a bearer token.
+///
+/// Reads are the `GET` routes (status, config, about, the live-audio stream);
+/// changes are everything else (restart, upload hold, device edits, reload).
+/// The host and origin checks apply in every mode, so even `none` cannot be
+/// driven by a DNS-rebinding page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelAuth {
+    /// `token` when [`Server::tokens`] is set, `loopback` when it is not:
+    /// the rule before this setting existed.
+    #[default]
+    Auto,
+    /// Every `/api/*` request needs a token. Needs `tokens`.
+    Token,
+    /// Reads are open; changes need a token. Needs `tokens`.
+    Changes,
+    /// Reads are open; changes are accepted from loopback only, with or
+    /// without a token. `tokens` is ignored.
+    Loopback,
+    /// Reads and changes are open to anyone who can reach the panel.
+    /// `tokens` is ignored. For a panel on a trusted network only.
+    None,
+}
+
+impl PanelAuth {
+    /// The rule actually in force, with `auto` resolved against `tokens`.
+    pub fn effective(self, tokens: &[String]) -> PanelAuth {
+        match self {
+            PanelAuth::Auto if tokens.iter().any(|t| !t.trim().is_empty()) => PanelAuth::Token,
+            PanelAuth::Auto => PanelAuth::Loopback,
+            other => other,
+        }
+    }
+
+    /// Whether a read (`GET`) needs a token under this rule.
+    pub fn reads_need_token(self, tokens: &[String]) -> bool {
+        self.effective(tokens) == PanelAuth::Token
+    }
+
+    /// The name used in config and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PanelAuth::Auto => "auto",
+            PanelAuth::Token => "token",
+            PanelAuth::Changes => "changes",
+            PanelAuth::Loopback => "loopback",
+            PanelAuth::None => "none",
+        }
+    }
+}
+
 /// `[server]` — the local control panel: bind address, auth tokens, logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Server {
@@ -463,6 +515,10 @@ pub struct Server {
     /// they never authenticate anything.
     #[serde(default)]
     pub tokens: Vec<String>,
+    /// Who may read the panel's `/api/*` routes and who may press its buttons.
+    /// See [`PanelAuth`]; the default, `auto`, is the `tokens` rule above.
+    #[serde(default)]
+    pub auth: PanelAuth,
     /// Whether the panel will serve live decoded audio (`/api/monitor/stream`).
     ///
     /// Off by default, and a separate decision from [`enabled`](Self::enabled):
@@ -548,6 +604,7 @@ impl Default for Server {
             enabled: false,
             bind: default_bind(),
             tokens: Vec::new(),
+            auth: PanelAuth::default(),
             public_url: None,
             live_audio: false,
             log_level: default_log_level(),
@@ -1793,6 +1850,14 @@ impl Config {
 
     /// Semantic validation beyond deserialization.
     pub fn validate(&self) -> Result<()> {
+        if matches!(self.server.auth, PanelAuth::Token | PanelAuth::Changes)
+            && !self.server.tokens.iter().any(|t| !t.trim().is_empty())
+        {
+            return Err(Error::config(format!(
+                "server: auth = \"{}\" needs at least one non-empty entry in tokens",
+                self.server.auth.as_str()
+            )));
+        }
         self.station.validate()?;
         self.recorder.validate()?;
         self.link.validate()?;
@@ -3544,5 +3609,44 @@ longitude = -180.0"
             "[[channel]]\nname = \"Tower\"\ndevice = \"gone\"\nfrequency = 118300000\nmode = \"am\"\n",
             "unknown device 'gone'",
         );
+    }
+
+    #[test]
+    fn server_auth_parses_and_resolves() {
+        let cfg = Config::from_toml_str("[server]\ntokens = [\"t\"]\nauth = \"changes\"\n")
+            .expect("auth = changes with a token loads");
+        assert_eq!(cfg.server.auth, PanelAuth::Changes);
+        assert!(!cfg.server.auth.reads_need_token(&cfg.server.tokens));
+
+        let cfg =
+            Config::from_toml_str("[server]\nauth = \"none\"\n").expect("none needs no token");
+        assert_eq!(
+            cfg.server.auth.effective(&cfg.server.tokens),
+            PanelAuth::None
+        );
+
+        let cfg = Config::from_toml_str("[server]\ntokens = [\"t\"]\n").expect("default");
+        assert_eq!(cfg.server.auth, PanelAuth::Auto);
+        assert_eq!(
+            cfg.server.auth.effective(&cfg.server.tokens),
+            PanelAuth::Token
+        );
+        assert!(cfg.server.auth.reads_need_token(&cfg.server.tokens));
+        assert_eq!(PanelAuth::Auto.effective(&[]), PanelAuth::Loopback);
+    }
+
+    #[test]
+    fn server_auth_that_needs_a_token_refuses_to_load_without_one() {
+        for mode in ["token", "changes"] {
+            let err =
+                Config::from_toml_str(&format!("[server]\nauth = \"{mode}\"\ntokens = [\" \"]\n"))
+                    .expect_err("no usable token");
+            assert!(
+                err.to_string()
+                    .contains("needs at least one non-empty entry in tokens"),
+                "{err}"
+            );
+        }
+        assert!(Config::from_toml_str("[server]\nauth = \"sometimes\"\n").is_err());
     }
 }

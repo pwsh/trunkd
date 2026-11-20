@@ -12,6 +12,7 @@ only things it changes are restarting one tuner, holding or releasing the uplink
 enabled    = true
 bind       = "127.0.0.1:8080"   # 0.0.0.0:8080 to expose it; then set tokens
 tokens     = []                 # bearer tokens; empty = open reads, loopback-only mutations; "" is ignored
+# auth     = "auto"             # auto | token | changes | none | loopback; see Security below
 live_audio = false              # opt-in live monitor stream; see below
 # public_url = "http://192.0.2.10:8080"   # how Keyup should link to this panel
 ```
@@ -77,12 +78,21 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/uplink `
 
 ## Security
 
-**Auth.** Which rule is in force is simply whether `server.tokens` is set:
+**Auth.** `server.auth` picks the rule. Its default, `auto`, is decided by whether `server.tokens`
+is set: `token` when it is, `loopback` when it is not.
 
-| `server.tokens` | `GET /` | `GET /api/*` | `POST /api/*` |
+| `server.auth` | `GET /` | `GET /api/*` (reads) | `POST`/`PUT`/`DELETE /api/*` (buttons) |
 | --- | --- | --- | --- |
-| empty | served | open | loopback peers only → otherwise **403** |
-| non-empty | served | `Authorization: Bearer <token>` → otherwise **401** | same bearer requirement → otherwise **401** |
+| `loopback` (`auto`, no tokens) | served | open | loopback peers only → otherwise **403** |
+| `token` (`auto`, tokens set) | served | `Authorization: Bearer <token>` → otherwise **401** | same bearer requirement → otherwise **401** |
+| `changes` | served | open | `Authorization: Bearer <token>` → otherwise **401**, loopback included |
+| `none` | served | open | open to any peer |
+
+`token` and `changes` need at least one entry in `tokens`; the config refuses to load without one.
+`loopback` and `none` ignore `tokens`. The live-audio stream is a read, so it follows the reads
+column. The host and origin checks below apply in every mode, so not even `none` can be driven
+by a page on another site through DNS rebinding. Use `none` only on a network where everyone who
+can reach the panel may restart tuners and edit devices.
 
 The page itself is always served, because an operator who cannot even load the shell has no way to
 discover that a token is what they are missing; the page has a token box (kept in that browser's
