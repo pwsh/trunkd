@@ -243,10 +243,10 @@ pub fn playlist_to_config(xml: &str) -> Result<Config> {
                     } else {
                         ChannelMode::Nbfm
                     },
-                    // A 25 kHz channel is kept but disabled: trunkd does not
-                    // record wideband channels yet, and an enabled one would
-                    // fail `trunkd check`.
-                    enabled: enabled && decode.bandwidth_hz() != 25_000,
+                    // A 25 kHz NBFM channel is kept but disabled: trunkd does
+                    // not record wideband FM yet, and an enabled one would
+                    // fail `trunkd check`. AM takes any raster.
+                    enabled: enabled && (is_am || decode.bandwidth_hz() != 25_000),
                     bandwidth_hz: decode.bandwidth_hz(),
                     talkgroup: decode.talkgroup,
                     tone: None,
@@ -279,8 +279,7 @@ pub fn playlist_to_config(xml: &str) -> Result<Config> {
 /// it cleanly (inside the edge guard, off the DC bin, clear of that site's
 /// control channels); the rest are grouped by frequency onto extra placeholder
 /// tuners, each centered on its group and nudged off any channel's DC bin. AM
-/// channels are not recorded, so they never cause a tuner of their own: they
-/// stay on a covering tuner, else the first one. The operator still edits
+/// channels are placed the same way. The operator still edits
 /// `backend`/`driver`/gain, but the config that comes out of `trunkd import`
 /// describes receivers that could actually hear what it lists.
 fn place_devices(cfg: &mut Config) {
@@ -298,12 +297,9 @@ fn place_devices(cfg: &mut Config) {
         devices.push(d);
     }
 
-    // NBFM channels no site tuner holds, grouped into captures of their own.
+    // Channels no site tuner holds, grouped into captures of their own.
     let mut homeless: Vec<usize> = Vec::new();
     for (i, c) in cfg.channel.iter_mut().enumerate() {
-        if c.mode != ChannelMode::Nbfm {
-            continue;
-        }
         match devices.iter().find(|d| holds(d, &cfg.site, c.frequency)) {
             Some(d) => c.device = d.id.clone(),
             None => homeless.push(i),
@@ -346,17 +342,6 @@ fn place_devices(cfg: &mut Config) {
             0,
             span_center(&freqs).unwrap_or(DEFAULT_CENTER_HZ),
         ));
-    }
-    for c in cfg
-        .channel
-        .iter_mut()
-        .filter(|c| c.mode != ChannelMode::Nbfm)
-    {
-        let covering = devices.iter().find(|d| {
-            usable_span_hz(d.center_frequency, d.sample_rate)
-                .is_some_and(|(lo, hi)| c.frequency >= lo && c.frequency <= hi)
-        });
-        c.device = covering.unwrap_or(&devices[0]).id.clone();
     }
     cfg.device = devices;
 }
@@ -505,9 +490,10 @@ mod tests {
         assert!(modes.contains(&ChannelMode::Am));
 
         // One placeholder tuner per site, each centered on its own control
-        // channels so the imported config actually validates, then one more
-        // for the VHF NBFM channels the 770 MHz tuner cannot hear.
-        assert_eq!(cfg.device.len(), cfg.site.len() + 1);
+        // channels so the imported config actually validates, then one each
+        // for the VHF NBFM channels and the airband AM channel the 770 MHz
+        // tuner cannot hear.
+        assert_eq!(cfg.device.len(), cfg.site.len() + 2);
         assert_eq!(cfg.site[0].device, "sdr0");
         for (d, s) in cfg.device.iter().zip(&cfg.site) {
             let center = d.center_frequency.expect("importer sets a center");
@@ -566,7 +552,7 @@ mod tests {
                 .iter()
                 .find(|d| d.id == c.device)
                 .unwrap_or_else(|| panic!("channel '{}' on unknown device '{}'", c.name, c.device));
-            if c.mode == ChannelMode::Nbfm {
+            if c.enabled {
                 assert!(
                     holds(d, &cfg.site, c.frequency),
                     "channel '{}' ({} Hz) not held by '{}' (center {:?})",
@@ -608,8 +594,8 @@ mod tests {
         assert!(cfg.site.is_empty());
         assert_eq!(
             cfg.device.len(),
-            2,
-            "one VHF and one UHF tuner: {:?}",
+            3,
+            "one airband, one VHF and one UHF tuner: {:?}",
             cfg.device
         );
         let dev = |name: &str| {
@@ -638,8 +624,13 @@ mod tests {
             .find(|d| d.id == dev("Tac"))
             .expect("tuner");
         assert_ne!(vhf.center_frequency, Some(154_325_000));
-        // AM is not recorded, so it gets no tuner of its own.
-        assert_eq!(dev("Tower"), "sdr0");
+        // AM is recorded, so the airband channel gets a tuner that hears it.
+        let tower = cfg
+            .device
+            .iter()
+            .find(|d| d.id == dev("Tower"))
+            .expect("tuner");
+        assert!(holds(tower, &cfg.site, 118_500_000), "{tower:?}");
         assert_placed(&cfg);
         cfg.validate().expect("imported analog config is valid");
     }

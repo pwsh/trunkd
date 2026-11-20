@@ -29,7 +29,7 @@ use trunkd_core::{Error, Metrics, Result};
 use trunkd_supervisor::{AfterBudget, RestartPolicy, SupervisedHandle, Supervisor, UnitHooks};
 use trunkd_uplink::{KeyupUplink, Spool, UplinkConfig, UplinkHold, UplinkStats};
 
-use crate::config::{AudioFormatName, Backend, ChannelMode, Config, DeviceRole};
+use crate::config::{AudioFormatName, Backend, Config, DeviceRole};
 use crate::pipeline::calls::CallDelivery;
 use crate::pipeline::control::{
     self, ControlConfig, DesiredState, RecorderControl, TunerControl, TunerDescriptor,
@@ -155,23 +155,10 @@ pub fn run_once_with_reload(
     reload: Arc<AtomicBool>,
 ) -> Result<RunSummary> {
     cfg.validate()?;
-    // AM is parsed (the sdrtrunk importer produces it) but not demodulated.
-    for c in cfg
-        .channel
-        .iter()
-        .filter(|c| c.enabled && c.mode == ChannelMode::Am)
-    {
-        tracing::warn!(
-            channel = %c.name,
-            frequency = c.frequency,
-            mode = ?c.mode,
-            "conventional analog channels are not implemented yet; skipping"
-        );
-    }
 
     let metrics = Metrics::new();
     let sites = Arc::new(site_specs(cfg));
-    // Enabled NBFM channels, which the device units build their engines from.
+    // Enabled channels (NBFM and AM), which the device units build their engines from.
     // Empty — and unallocated — for a config with none.
     let channels = crate::pipeline::conventional::channel_specs(cfg);
     if sites.is_empty() && channels.is_empty() {
@@ -736,7 +723,7 @@ fn orphan_after(cfg: &Config) -> Duration {
     let channels = cfg
         .channel
         .iter()
-        .filter(|c| c.enabled && c.mode == ChannelMode::Nbfm)
+        .filter(|c| c.enabled)
         .filter_map(|c| c.params().ok())
         .map(|p| u64::from(p.squelch.hang_ms) + u64::from(p.squelch.tone_timeout_ms));
     let longest_ms = sites.chain(channels).max().unwrap_or(0);
@@ -746,7 +733,7 @@ fn orphan_after(cfg: &Config) -> Duration {
 
 /// Depth of the DSP → call-thread queue: [`CALL_QUEUE_DEPTH`], plus
 /// [`QUEUE_DEPTH_PER_CHANNEL`](crate::pipeline::conventional::QUEUE_DEPTH_PER_CHANNEL)
-/// per enabled NBFM channel — unchanged when there are none.
+/// per enabled channel — unchanged when there are none.
 fn call_queue_depth(channels: usize) -> usize {
     CALL_QUEUE_DEPTH
         + channels.saturating_mul(crate::pipeline::conventional::QUEUE_DEPTH_PER_CHANNEL)

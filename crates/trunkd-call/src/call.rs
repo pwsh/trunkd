@@ -296,6 +296,16 @@ impl ConventionalInfo {
         }
     }
 
+    /// An AM call's extras with nothing measured yet: `mode=am`,
+    /// `decoder=AM`.
+    pub fn am() -> Self {
+        ConventionalInfo {
+            mode: "am".to_owned(),
+            decoder: "AM".to_owned(),
+            ..ConventionalInfo::default()
+        }
+    }
+
     /// The extras as wire `(name, value)` pairs, in upload order. The one list
     /// both the multipart body and the sidecar are written from, so the two
     /// can never spell a key differently. Numbers carry one decimal.

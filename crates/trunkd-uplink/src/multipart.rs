@@ -48,7 +48,7 @@ use trunkd_call::{AudioFormat, CallKind, FinishedCall};
 /// | `recorder` | `trunkd` |
 /// | `site` | site label |
 /// | `nac`, `algorithm`, `keyId` | when known |
-/// | `mode`, `decoder` | `nbfm`, `NBFM` — conventional-channel calls only |
+/// | `mode`, `decoder` | `nbfm`/`NBFM` or `am`/`AM` — conventional-channel calls only |
 /// | `tone`, `toneDetected`, `squelchReason` | configured tone, tone heard, end reason — conventional only, when known |
 /// | `snrDb`, `peakDeviationHz`, `offsetHz` | squelch-open SNR and call measurements, one decimal — conventional only, when known |
 /// | `sourceQuality` | JSON `{"instance":…,"voice_frames":…,"bad_frames":…,"rssi_dbfs":…}`, when this recorder has something to say |

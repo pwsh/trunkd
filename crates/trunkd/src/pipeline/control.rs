@@ -2926,7 +2926,7 @@ const MAX_CHANNEL_NAME_LEN: usize = 64;
 /// frequency, tone, talkgroup) comes from the config; the rest is measured.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ChannelStatus {
-    /// Position among the enabled NBFM channels: the `i` of `channel.{i}.*`.
+    /// Position among the enabled channels: the `i` of `channel.{i}.*`.
     pub index: usize,
     pub name: String,
     pub system: String,

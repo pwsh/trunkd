@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Conventional analog (NBFM) channels on a device's DSP thread.
+//! Conventional analog (NBFM and AM) channels on a device's DSP thread.
 //!
 //! A `[[channel]]` is one fixed frequency with no control channel: the device
 //! that covers it subscribes the frequency on its one
@@ -14,7 +14,7 @@
 //!
 //! # Zero cost without channels
 //!
-//! [`channel_specs`] of a config with no enabled NBFM `[[channel]]` is an
+//! [`channel_specs`] of a config with no enabled `[[channel]]` is an
 //! empty `Vec` (no allocation), so a device builds no engine, subscribes
 //! nothing, and every per-block loop over its engines iterates an empty slice.
 //! A device with sites builds its bank from its first site exactly as before;
@@ -38,7 +38,7 @@ use num_complex::Complex;
 use trunkd_analog::{ChannelEvent, ChannelParams, ChannelState, NbfmChannel, INPUT_RATE_HZ};
 use trunkd_p25::dsp::bank::{BankHandle, ChannelBank, SharedChannelBank};
 
-use crate::config::{ChannelMode, Config, Device};
+use crate::config::{Config, Device};
 
 /// Bit 63 marks a conventional call id (see the module docs).
 pub(crate) const CONV_ID_FLAG: u64 = 1 << 63;
@@ -47,14 +47,14 @@ pub(crate) const CONV_ID_FLAG: u64 = 1 << 63;
 /// channel produces at most ~10 messages a second.
 pub(crate) const QUEUE_DEPTH_PER_CHANNEL: usize = 8;
 
-/// Immutable description of one enabled NBFM channel, shared by the DSP
+/// Immutable description of one enabled channel (NBFM or AM), shared by the DSP
 /// thread that runs it and (through [`CallMsg::ConvStarted`]) the call thread
 /// that assembles its calls.
 ///
 /// [`CallMsg::ConvStarted`]: crate::pipeline::CallMsg::ConvStarted
 #[derive(Debug, Clone)]
 pub(crate) struct ChannelSpec {
-    /// Position among the enabled NBFM channels, in config order: the `i` of
+    /// Position among the enabled channels, in config order: the `i` of
     /// the `channel.{i}.*` metrics.
     pub(crate) index: usize,
     /// `name`, sent as `talkgroupLabel`.
@@ -79,16 +79,15 @@ pub(crate) struct ChannelSpec {
     pub(crate) params: ChannelParams,
 }
 
-/// One [`ChannelSpec`] per enabled NBFM channel, in config order.
+/// One [`ChannelSpec`] per enabled channel (NBFM or AM), in config order.
 ///
-/// AM and disabled channels get none (AM is warned about and skipped by the
-/// recorder). A channel the config cannot resolve — which validation has
+/// Disabled channels get none. A channel the config cannot resolve — which validation has
 /// already refused, so only reachable for a config that skipped it — is left
 /// out with an error rather than taking the device down.
 pub(crate) fn channel_specs(cfg: &Config) -> Vec<ChannelSpec> {
     cfg.channel
         .iter()
-        .filter(|c| c.enabled && c.mode == ChannelMode::Nbfm)
+        .filter(|c| c.enabled)
         .enumerate()
         .filter_map(|(index, c)| {
             let resolved = cfg
@@ -399,9 +398,13 @@ mod tests {
     }
 
     #[test]
-    fn specs_cover_enabled_nbfm_channels_with_their_labels() {
+    fn specs_cover_enabled_channels_with_their_labels() {
         let specs = channel_specs(&cfg(TWO_CHANNELS));
-        assert_eq!(specs.len(), 2, "disabled and AM channels are not started");
+        assert_eq!(specs.len(), 3, "disabled channels are not started; AM is");
+        let air = &specs[1];
+        assert_eq!(air.name, "Airband");
+        assert_eq!(air.params.modulation, trunkd_analog::Modulation::Am);
+        assert_eq!(specs[0].params.modulation, trunkd_analog::Modulation::Fm);
         let fire = &specs[0];
         assert_eq!(fire.index, 0);
         assert_eq!(fire.metric_prefix, "channel.0");
@@ -410,8 +413,8 @@ mod tests {
         assert_eq!(fire.device_id, "v");
         assert_eq!(fire.talkgroup, 14);
         assert_eq!(fire.tone.as_deref(), Some("167.9"));
-        let roads = &specs[1];
-        assert_eq!(roads.index, 1, "indices count enabled NBFM channels only");
+        let roads = &specs[2];
+        assert_eq!(roads.index, 2, "indices count enabled channels only");
         assert_eq!(
             roads.system_label, "Example County",
             "falls back to [uplink]"
@@ -442,7 +445,7 @@ mod tests {
             .map(|s| ConvEngine::new(Arc::new(s), &bank, 64 * 1024, &metrics).expect("engine"))
             .collect();
         let b = bank.borrow();
-        assert_eq!(b.channel_count(), 2);
+        assert_eq!(b.channel_count(), 3, "NBFM and AM channels subscribe alike");
         assert_eq!(
             b.subscribed_frequency(engines[0].handle()),
             Some(154_250_000.0)

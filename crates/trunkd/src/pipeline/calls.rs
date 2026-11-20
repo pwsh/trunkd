@@ -801,7 +801,10 @@ pub(crate) fn run(
                     tone: spec.tone.clone(),
                     tone_detected: start.tone_detected.map(|t| t.to_string()),
                     snr_db: Some(start.snr_db),
-                    ..ConventionalInfo::nbfm()
+                    ..match spec.params.modulation {
+                        trunkd_analog::Modulation::Fm => ConventionalInfo::nbfm(),
+                        trunkd_analog::Modulation::Am => ConventionalInfo::am(),
+                    }
                 };
                 conv.insert(
                     spec.index,
@@ -850,7 +853,10 @@ pub(crate) fn run(
                     call.info.tone_detected = Some(t.to_string());
                 }
                 call.info.snr_db = Some(end.snr_db);
-                call.info.peak_deviation_hz = Some(end.peak_deviation_hz);
+                // Deviation is an FM measurement; AM leaves it unset.
+                call.info.peak_deviation_hz = (call.spec.params.modulation
+                    == trunkd_analog::Modulation::Fm)
+                    .then_some(end.peak_deviation_hz);
                 call.info.offset_hz = Some(end.offset_hz);
                 finish_conv(call, at_ms as i64, conv_reason_name(end.reason));
             }

@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `trunkd-analog` — analog NBFM conventional-channel receiver.
+//! `trunkd-analog` — analog conventional-channel receiver (NBFM and AM).
 //!
 //! One channel engine takes the 25 ksps complex baseband that the device's
 //! shared channel bank produces for one conventional frequency and turns it
 //! into calls: squelched 8 kHz mono PCM with call boundaries, gated by
-//! carrier/SNR and optionally by a CTCSS tone or DCS code ([`tone::Tone`]).
+//! carrier/SNR and, for NBFM, optionally by a CTCSS tone or DCS code
+//! ([`tone::Tone`]). AM ([`Modulation::Am`], e.g. the VHF airband) shares the
+//! whole path except the demodulator: an envelope detector with a
+//! carrier-tracking AGC instead of the FM discriminator, no de-emphasis and
+//! no tone gate.
 //!
 //! # Engine contract
 //!
@@ -126,6 +130,29 @@ impl Bandwidth {
     }
 }
 
+/// How a channel's carrier is modulated (`[[channel]] mode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Modulation {
+    /// Narrowband FM: discriminator, de-emphasis, optional CTCSS/DCS gate.
+    #[default]
+    Fm,
+    /// Double-sideband AM with carrier (the VHF airband): envelope detector
+    /// normalised by the tracked carrier level, so the audio level follows
+    /// the modulation depth rather than the signal strength. No de-emphasis,
+    /// no tone gate, no tone detectors.
+    Am,
+}
+
+impl Modulation {
+    /// Wire spelling of the upload's `mode` field: `nbfm` / `am`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Modulation::Fm => "nbfm",
+            Modulation::Am => "am",
+        }
+    }
+}
+
 /// Squelch and call-segmentation settings (`[channel.squelch]`). All times in
 /// ms unless the name says otherwise. [`Default`] gives the documented
 /// defaults.
@@ -173,6 +200,8 @@ impl Default for SquelchParams {
 /// the recorder; the engine sees only signal-processing settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelParams {
+    /// FM or AM.
+    pub modulation: Modulation,
     /// Channel bandwidth class (`bandwidth_hz` 12500 / 25000).
     pub bandwidth: Bandwidth,
     /// Required tone; `None` = carrier squelch (detectors still run and report
@@ -192,6 +221,7 @@ impl Default for ChannelParams {
     /// single-bit DCS correction allowed.
     fn default() -> Self {
         ChannelParams {
+            modulation: Modulation::Fm,
             bandwidth: Bandwidth::Narrow,
             tone: None,
             deemphasis_us: 750,
@@ -212,6 +242,9 @@ impl ChannelParams {
 
     /// Check the settings an engine cannot run with.
     pub fn validate(&self) -> Result<(), ParamsError> {
+        if self.modulation == Modulation::Am && self.tone.is_some() {
+            return Err(ParamsError::ToneOnAm);
+        }
         let s = &self.squelch;
         if !s.open_db.is_finite() || !s.close_db.is_finite() {
             return Err(ParamsError::NonFinite);
@@ -252,6 +285,9 @@ pub enum ParamsError {
     /// `max_call_s` is zero.
     #[error("squelch max_call_s must be greater than 0")]
     ZeroMaxCall,
+    /// A `tone` was set on an AM channel, which has no tone gate.
+    #[error("tone squelch is NBFM only; an AM channel cannot have a tone")]
+    ToneOnAm,
     /// `min_call_ms` is not shorter than `max_call_s`.
     #[error(
         "squelch min_call_ms ({min_call_ms}) must be shorter than max_call_s ({max_call_s} s)"
@@ -465,6 +501,9 @@ pub struct NbfmChannel {
     power_dbfs: f32,
     snr_db: f32,
     tone_now: Option<Tone>,
+    /// AM only: tracked carrier amplitude (the AGC reference); 0 until the
+    /// first sample.
+    am_carrier: f32,
 }
 
 /// Sub-audio samples per squelch block, rounded up (125 / 10).
@@ -476,6 +515,9 @@ const SUB_PER_BLOCK_MAX: usize = squelch::BLOCK_SAMPLES.div_ceil(fm::SUBAUDIO_DE
 pub fn default_detectors(params: &ChannelParams) -> Vec<Box<dyn ToneDetector>> {
     let ctcss = || Box::new(ctcss::CtcssDetector::new()) as Box<dyn ToneDetector>;
     let dcs = || Box::new(dcs::DcsDetector::new(params.dcs_strict)) as Box<dyn ToneDetector>;
+    if params.modulation == Modulation::Am {
+        return Vec::new();
+    }
     match params.tone {
         Some(t) if t.is_ctcss() => vec![ctcss()],
         Some(_) => vec![dcs()],
@@ -506,7 +548,11 @@ impl NbfmChannel {
             disc: fm::Discriminator::new(params.bandwidth.max_deviation_hz()),
             noise: fm::NoiseMeter::new(),
             sub: fm::SubaudioChain::new(),
-            audio: fm::AudioChain::new(params.deemphasis_us),
+            // AM audio is never pre-emphasised.
+            audio: fm::AudioChain::new(match params.modulation {
+                Modulation::Fm => params.deemphasis_us,
+                Modulation::Am => 0,
+            }),
             peak_lpf: fm::butter2_lowpass(fs, 3_000.0),
             squelch,
             seg,
@@ -526,6 +572,7 @@ impl NbfmChannel {
             power_dbfs: squelch::MIN_POWER_DBFS,
             snr_db: 0.0,
             tone_now: None,
+            am_carrier: 0.0,
         }
     }
 
@@ -560,7 +607,11 @@ impl NbfmChannel {
                 self.sub_buf[self.sub_len] = s;
                 self.sub_len += 1;
             }
-            self.audio.push(d, &mut self.pcm_buf);
+            let audio = match self.params.modulation {
+                Modulation::Fm => d,
+                Modulation::Am => self.am_demod(y),
+            };
+            self.audio.push(audio, &mut self.pcm_buf);
             let lp = self.peak_lpf.push(d);
             self.dev_acc += d;
             if let Some(dc) = self.dc {
@@ -597,8 +648,13 @@ impl NbfmChannel {
         let dc = *self.dc.get_or_insert(mean);
         self.dc = Some(dc + DC_ALPHA * (mean - dc));
         let measure = segment::BlockMeasure {
+            // The discriminator still measures an AM carrier's offset, but
+            // "deviation" means nothing for AM.
             mean_dev_hz: mean * self.max_dev_hz,
-            peak_dev_hz: self.peak_acc * self.max_dev_hz,
+            peak_dev_hz: match self.params.modulation {
+                Modulation::Fm => self.peak_acc * self.max_dev_hz,
+                Modulation::Am => 0.0,
+            },
         };
         debug_assert_eq!(self.pcm_buf.len(), segment::PCM_PER_BLOCK);
         let inp = segment::BlockInput {
@@ -620,6 +676,30 @@ impl NbfmChannel {
         self.dev_acc = 0.0;
         self.peak_acc = 0.0;
         self.block_index += 1;
+    }
+
+    /// AM envelope detector with AGC: the modulation index `|y| / carrier - 1`,
+    /// where `carrier` follows the envelope with a ~20 ms one-pole. Voice sits
+    /// above the audio chain's 300 Hz high-pass, far above the tracker's
+    /// ~8 Hz corner, so the tracker removes the carrier and leaves the voice;
+    /// 100 % modulation comes out at ±1.0, the same scale as a full-scale FM
+    /// deviation.
+    #[inline]
+    fn am_demod(&mut self, y: Complex<f32>) -> f32 {
+        let env = y.norm();
+        if self.am_carrier <= 0.0 {
+            self.am_carrier = env;
+        }
+        // Rising fast lets a new transmission settle in a few ms instead of
+        // blasting its first 50 ms at the noise floor's gain.
+        let alpha = if env > 2.0 * self.am_carrier {
+            AM_CARRIER_ATTACK
+        } else {
+            AM_CARRIER_ALPHA
+        };
+        self.am_carrier += alpha * (env - self.am_carrier);
+        let c = self.am_carrier.max(AM_MIN_CARRIER);
+        (env / c - 1.0).clamp(-1.5, 1.5)
     }
 
     /// The recorder is stopping at stream time `at_ms`: an open call ends
@@ -654,6 +734,18 @@ impl NbfmChannel {
 /// Largest disagreement between the caller's `at_ms` and the engine's own
 /// sample clock that is treated as rounding, ms.
 const REANCHOR_MS: f64 = 2.0;
+
+/// AM carrier tracker: one-pole coefficient at 25 ksps for a ~20 ms time
+/// constant (1 / (0.02 × 25 000)).
+const AM_CARRIER_ALPHA: f32 = 0.002;
+
+/// AM carrier tracker while the envelope is more than twice the estimate (a
+/// carrier coming up): ~1 ms.
+const AM_CARRIER_ATTACK: f32 = 0.04;
+
+/// Floor for the AM carrier estimate, so silence cannot divide by zero
+/// (−120 dBFS amplitude).
+const AM_MIN_CARRIER: f32 = 1e-6;
 
 /// One-pole smoothing of the per-block discriminator mean (≈ 50 ms), the
 /// DC reference for the peak-deviation measurement.
@@ -702,6 +794,116 @@ mod tests {
             p.validate(),
             Err(ParamsError::MinExceedsMax { .. })
         ));
+    }
+
+    /// Deterministic complex noise (xorshift), unit-variance-ish per rail.
+    struct Noise(u64);
+    impl Noise {
+        fn next(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
+        }
+        fn c(&mut self, amp: f32) -> Complex<f32> {
+            Complex::new(self.next() * amp, self.next() * amp)
+        }
+    }
+
+    /// `secs` of 25 ksps IQ: noise throughout, and from `on.0` to `on.1`
+    /// seconds an AM carrier of amplitude `carrier`, 300 Hz off centre,
+    /// modulated `depth` by a 1 kHz tone.
+    fn am_iq(secs: f32, on: (f32, f32), carrier: f32, depth: f32) -> Vec<Complex<f32>> {
+        let fs = INPUT_RATE_HZ as f32;
+        let mut n = Noise(0x9e37_79b9_7f4a_7c15);
+        (0..(secs * fs) as usize)
+            .map(|i| {
+                let t = i as f32 / fs;
+                let mut x = n.c(1e-4);
+                if t >= on.0 && t < on.1 {
+                    let env = carrier * (1.0 + depth * (std::f32::consts::TAU * 1_000.0 * t).sin());
+                    let ph = std::f32::consts::TAU * 300.0 * t;
+                    x += Complex::new(ph.cos(), ph.sin()) * env;
+                }
+                x
+            })
+            .collect()
+    }
+
+    /// Run an engine over `iq` in 10 ms blocks; return (calls, all PCM).
+    fn run_am(iq: &[Complex<f32>]) -> (usize, Vec<i16>) {
+        let params = ChannelParams {
+            modulation: Modulation::Am,
+            ..ChannelParams::default()
+        };
+        assert_eq!(params.validate(), Ok(()));
+        let mut e = NbfmChannel::new(params);
+        let (mut calls, mut pcm) = (0, Vec::new());
+        for (k, chunk) in iq.chunks(250).enumerate() {
+            e.process(chunk, k as u64 * 10, &mut |ev| match ev {
+                ChannelEvent::Started(_) => calls += 1,
+                ChannelEvent::Pcm(p) => pcm.extend(p),
+                ChannelEvent::Ended(_) => {}
+            });
+        }
+        (calls, pcm)
+    }
+
+    /// Goertzel power of `f` Hz in 8 kHz PCM, normalised to full scale.
+    fn tone_level(pcm: &[i16], f: f32) -> f32 {
+        let w = std::f32::consts::TAU * f / AUDIO_RATE_HZ as f32;
+        let (mut s1, mut s2) = (0.0f32, 0.0f32);
+        for &x in pcm {
+            let s0 = x as f32 / i16::MAX as f32 + 2.0 * w.cos() * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        (s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2).sqrt() / pcm.len() as f32 * 2.0
+    }
+
+    #[test]
+    fn am_channel_records_the_modulation_at_a_level_set_by_depth_not_strength() {
+        let mut levels = Vec::new();
+        for carrier in [0.01f32, 0.1] {
+            let (calls, pcm) = run_am(&am_iq(4.0, (0.5, 3.0), carrier, 0.8));
+            assert_eq!(
+                calls, 1,
+                "one call for one transmission (carrier {carrier})"
+            );
+            assert!(
+                pcm.len() > 8_000 * 2,
+                "about 2.5 s of audio, got {}",
+                pcm.len()
+            );
+            // A settled second from the middle of the transmission.
+            let mid = &pcm[4_000..12_000];
+            let on = tone_level(mid, 1_000.0);
+            let off = tone_level(mid, 1_700.0);
+            assert!(on > 0.3, "1 kHz tone at 80 % depth comes through: {on}");
+            assert!(on > 20.0 * off, "and dominates the audio: {on} vs {off}");
+            levels.push(on);
+        }
+        // 20 dB stronger signal, same modulation depth: same audio level.
+        assert!((levels[0] / levels[1] - 1.0).abs() < 0.1, "AGC: {levels:?}");
+    }
+
+    #[test]
+    fn am_channel_stays_closed_on_noise_and_refuses_a_tone() {
+        let (calls, pcm) = run_am(&am_iq(3.0, (9.0, 9.0), 0.0, 0.0));
+        assert_eq!((calls, pcm.len()), (0, 0), "noise alone opens nothing");
+        assert!(default_detectors(&ChannelParams {
+            modulation: Modulation::Am,
+            ..ChannelParams::default()
+        })
+        .is_empty());
+        let p = ChannelParams {
+            modulation: Modulation::Am,
+            tone: Some("100.0".parse().unwrap()),
+            ..ChannelParams::default()
+        };
+        assert_eq!(p.validate(), Err(ParamsError::ToneOnAm));
+        assert_eq!(Modulation::Am.as_str(), "am");
+        assert_eq!(Modulation::Fm.as_str(), "nbfm");
     }
 
     #[test]

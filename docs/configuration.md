@@ -183,7 +183,8 @@ also replace a tuner's primary-site candidates at runtime.
 
 ## `[[channel]]` — one conventional analog channel
 
-An analog NBFM frequency — a fire dispatch, a school-bus channel — recorded call by call. The
+An analog NBFM or AM frequency — a fire dispatch, a school-bus channel, an airport tower —
+recorded call by call. The
 channel is cut out of a tuner's capture by the same channelizer the sites use, so a tuner can
 carry a P25 site and channels at once, or channels alone (a config with channels and no
 `[[site]]` is valid). Each call is uploaded as a **group call** under (`system`, `talkgroup`)
@@ -214,9 +215,9 @@ tone      = "167.9"
 | `site` | `[uplink] site_label`, then the device id | Site label recorded on the calls. |
 | `device` | auto | The `[[device]]` that carries the channel. Unset picks the one device whose usable span covers `frequency`; none or several is a startup error that asks you to set it. |
 | `frequency` | — | Required. Channel centre, Hz. |
-| `mode` | `"nbfm"` | `"am"` is accepted but not recorded: it is skipped with a warning. |
+| `mode` | `"nbfm"` | `"nbfm"` or `"am"`. AM (the 118–137 MHz airband) uses an envelope detector with a carrier-tracking AGC, so the audio level follows the modulation depth, not the signal strength. AM has no de-emphasis (`deemphasis_us` is ignored) and no tone gate (`tone` is refused). Calls upload with `mode=am`. |
 | `enabled` | `true` | A disabled channel stays in the file and is not checked or started. |
-| `bandwidth_hz` | `12500` | `12500` (±2.5 kHz deviation), the only value supported today. 25 kHz (wideband) channels are not supported yet: `25000` is refused at startup. |
+| `bandwidth_hz` | `12500` | NBFM: `12500` (±2.5 kHz deviation), the only value supported today; 25 kHz (wideband) FM is refused at startup. AM: `8333`, `12500` or `25000`, naming the airband raster; every AM channel gets the same ±4 kHz filter, which holds the voice envelope on any of them. |
 | `talkgroup` | `frequency / 1000` | Talkgroup id the calls carry (154.250 MHz → `154250`). Keep the number an existing archive already uses for the channel. `[recorder] skip_talkgroups` never applies to conventional channels. |
 | `tone` | unset | The sub-audible tone a call must carry to be recorded. CTCSS as a frequency from the standard 50-tone table (`"167.9"`, also `"PL 167.9"`); DCS as `"D445N"`, `"D445I"` (inverted), `"445"` or `"DCS 445"`. A bare TOML number works too. Unset is **carrier squelch**: any carrier opens the channel, and a tone heard is still reported on the call. |
 | `dcs_strict` | `false` | DCS only: accept only error-free code words instead of correcting one bit. |

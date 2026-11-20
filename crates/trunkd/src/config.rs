@@ -1396,6 +1396,12 @@ impl Channel {
         // `Bandwidth::Wide` stays reserved in the engine until the bank can
         // deliver a wide slice.
         let bandwidth = match self.bandwidth_hz {
+            // An AM voice envelope (±3–4 kHz) fits the 12.5 kHz slice whatever
+            // the channel raster: 8.33 kHz, 12.5 kHz and 25 kHz airband
+            // channels all get the narrow filter.
+            8_333 | 12_500 | 25_000 if self.mode == ChannelMode::Am => {
+                trunkd_analog::Bandwidth::Narrow
+            }
             12_500 => trunkd_analog::Bandwidth::Narrow,
             25_000 => {
                 return Err(Error::config(format!(
@@ -1412,7 +1418,18 @@ impl Channel {
             }
         };
         let defaults = trunkd_analog::ChannelParams::default();
+        let modulation = match self.mode {
+            ChannelMode::Nbfm => trunkd_analog::Modulation::Fm,
+            ChannelMode::Am => trunkd_analog::Modulation::Am,
+        };
+        if modulation == trunkd_analog::Modulation::Am && self.tone.is_some() {
+            return Err(Error::config(format!(
+                "channel '{}': tone is NBFM only; remove it from this AM channel",
+                self.name
+            )));
+        }
         let params = trunkd_analog::ChannelParams {
+            modulation,
             bandwidth,
             tone: self.parsed_tone()?,
             deemphasis_us: self.deemphasis_us.unwrap_or(defaults.deemphasis_us),
@@ -1984,9 +2001,8 @@ impl Config {
         Ok(())
     }
 
-    /// The `[[channel]]` rules, applied to enabled NBFM channels only: a
-    /// disabled channel is never started, and AM is out of scope (warned about
-    /// and skipped at run time), so neither can fail a load that used to pass.
+    /// The `[[channel]]` rules, applied to enabled channels (NBFM and AM): a
+    /// disabled channel is never started, so it cannot fail a load.
     ///
     /// Per channel: the settings parse (`bandwidth_hz`, `tone`, squelch), the
     /// serving device resolves and has a centre and a channelizer-legal rate,
@@ -1998,11 +2014,7 @@ impl Config {
     fn validate_channels(&self) -> Result<()> {
         use trunkd_p25::dsp::channelizer::{ChannelizerError, PolyphaseChannelizerM2};
 
-        let nbfm = || {
-            self.channel
-                .iter()
-                .filter(|c| c.enabled && c.mode == ChannelMode::Nbfm)
-        };
+        let nbfm = || self.channel.iter().filter(|c| c.enabled);
         // One filterbank per device, built only to ask it `bin_for`.
         let mut banks: BTreeMap<&str, PolyphaseChannelizerM2> = BTreeMap::new();
         // (device id, frequency, channel name) for the spacing checks.
@@ -3582,19 +3594,13 @@ longitude = -180.0"
         assert!(!out.contains("open_db"), "{out}");
     }
 
-    /// AM is parsed and skipped at run time, and a disabled channel is never
-    /// started: neither is held to the NBFM rules, so configs that loaded
-    /// before still load.
+    /// A disabled channel is never started, so it is not held to the
+    /// channel rules; an AM channel is recorded and is, except that its
+    /// `bandwidth_hz` may name any airband raster and it cannot have a tone.
     #[test]
-    fn am_and_disabled_channels_are_not_held_to_the_nbfm_rules() {
+    fn am_channels_are_checked_and_disabled_ones_are_not() {
         channels(
             r#"
-            [[channel]]
-            name = "Tower"
-            device = "vhf0"
-            frequency = 118300000
-            mode = "am"
-            bandwidth_hz = 8333
             [[channel]]
             name = "Off"
             device = "uhf0"
@@ -3603,8 +3609,29 @@ longitude = -180.0"
             tone = "nonsense"
             "#,
         )
-        .expect("AM and disabled channels load as before");
-        // The device must still exist, as it always had to.
+        .expect("a disabled channel loads whatever it says");
+        let tower = |extra: &str| {
+            format!(
+                "[[channel]]\nname = \"Tower\"\ndevice = \"vhf0\"\nfrequency = 155300000\nmode = \"am\"\n{extra}"
+            )
+        };
+        for bw in ["8333", "12500", "25000"] {
+            channels(&tower(&format!("bandwidth_hz = {bw}\n")))
+                .unwrap_or_else(|e| panic!("AM with bandwidth_hz {bw} loads: {e}"));
+        }
+        let cfg = channels(&tower("")).expect("AM loads");
+        let p = cfg.channel[0].params().expect("params");
+        assert_eq!(p.modulation, trunkd_analog::Modulation::Am);
+        rejects(&tower("tone = \"100.0\"\n"), "tone is NBFM only");
+        rejects(
+            &tower("bandwidth_hz = 6250\n"),
+            "bandwidth_hz must be 12500",
+        );
+        // An AM channel's frequency must be inside its device's span, like any.
+        rejects(
+            "[[channel]]\nname = \"Tower\"\ndevice = \"vhf0\"\nfrequency = 118300000\nmode = \"am\"\n",
+            "outside device 'vhf0'",
+        );
         rejects(
             "[[channel]]\nname = \"Tower\"\ndevice = \"gone\"\nfrequency = 118300000\nmode = \"am\"\n",
             "unknown device 'gone'",

@@ -13,6 +13,11 @@ change configuration or behaviour; the entry says how.
   live config with the new binary, verifies that the site tuners lock after the restart, and
   rolls back if they do not. See `scripts/linux/README.md`.
 - docs/install-linux.md: reaching the panel on a headless box or container.
+- Conventional AM channels (`[[channel]] mode = "am"`, e.g. airport towers and CTAFs in
+  the 118–137 MHz airband) are recorded instead of skipped: envelope detector with a
+  carrier-tracking AGC, same squelch and call segmentation as NBFM, no tone gate. Uploads
+  carry `mode=am`, `decoder=AM` and no `peakDeviationHz`. `trunkd import-sdrtrunk` now gives
+  AM channels a tuner that hears them, like NBFM.
 - `[server] auth` chooses which panel requests need a token: `changes` keeps reads open
   and requires the token for buttons only, `none` opens buttons to the network, `loopback`
   and `token` name the two existing rules. The default, `auto`, is the previous behaviour.
