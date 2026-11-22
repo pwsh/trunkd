@@ -1,0 +1,10 @@
+# One watch pass: see trunkd-watch.sh. Started by trunkd-watch.timer.
+[Unit]
+Description=Check the recorder box and push alerts to ntfy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/trunkd-watch.sh
+Nice=10

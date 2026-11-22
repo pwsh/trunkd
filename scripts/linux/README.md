@@ -22,8 +22,8 @@ Every run, whatever the source:
 2. **Install.** The running binary is kept as `/usr/local/bin/trunkd.prev`, the new one is
    moved into place, and `trunkd.service` restarts. The stop is the usual SIGINT, so open
    calls finish and the spool is kept.
-3. **Verify.** The local panel's `/api/status` is polled until every enabled tuner that has a
-   site is locked again (up to `LOCK_TIMEOUT`, 120 s). The panel's address and bearer token
+3. **Verify.** The local panel's `/api/status` is polled until every enabled P25 site tuner
+   (one with a traffic pool; analog-channel-only tuners have nothing to lock) is locked again (up to `LOCK_TIMEOUT`, 120 s). The panel's address and bearer token
    come from `[server]` in the config. A recorder with no site tuners, only conventional
    channels, passes once it has stayed up for 20 s. With the panel disabled, it passes if the
    service stays up for 30 s.
@@ -92,3 +92,30 @@ State lives in `/var/lib/trunkd-update`:
 * A `SOURCE=git` build shares the container's CPUs with the recorder. The unit runs it at
   `Nice=19`, idle I/O, `CPUWeight=20` and `-j2`. In an unprivileged container the recorder
   itself runs without real-time priority, so prefer `SOURCE=release` there.
+
+# Alerts to ntfy
+
+`trunkd-watch.sh` and its two-minute timer push a notification to an
+[ntfy](https://ntfy.sh) topic when something on the box needs attention. It sends one when a
+problem appears and one when it has stayed fixed for two runs; nothing in between. It covers what
+the upstream archive cannot see from outside:
+
+| Setting | Watches |
+| --- | --- |
+| `DISK_PATHS` | used space per mount point (`DISK_WARN` 85 %, `DISK_CRIT` 95 %) |
+| `SERVICES` | units that must be active (e.g. `trunkd`, an SDR vendor service) |
+| `FAILED_UNITS` | oneshots that must not be failed (e.g. `trunkd-update.service`) |
+| `PANEL_URL` | trunkd's panel: every enabled P25 site tuner locked, no device unit failed or retrying, no sample overflow two runs running, uploads flowing (no open circuit, spool under `SPOOL_WARN_CALLS`) |
+| `CHECK_CLOCK` | the clock is NTP-synchronised |
+| `PVE_STORAGE`, `PVE_THINPOOL`, `PVE_CONTAINERS` | on a Proxmox host: storage use, LVM thin-pool data/metadata, containers running |
+
+Install on the recorder box, and on its hypervisor if you want that watched too:
+
+```bash
+install -m 0755 scripts/linux/trunkd-watch.sh /usr/local/sbin/trunkd-watch.sh
+install -m 0644 scripts/linux/trunkd-watch.service scripts/linux/trunkd-watch.timer /etc/systemd/system/
+install -m 0600 scripts/linux/watch.conf.example /etc/trunkd/watch.conf     # set NTFY_URL and the checks
+trunkd-watch.sh --status        # every subject and whether it is raised; sends nothing
+trunkd-watch.sh --test          # one test notification
+systemctl daemon-reload && systemctl enable --now trunkd-watch.timer
+```

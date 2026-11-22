@@ -108,7 +108,7 @@ print("1" if s.get("enabled", False) else "0")
 EOF
 }
 
-# Wait until every enabled tuner with a site is locked. A recorder with no site
+# Wait until every enabled P25 site tuner is locked. A recorder with no site
 # tuners (conventional channels only) passes once the panel answers and the
 # service has stayed up for 20 s.
 wait_locked() {
@@ -132,7 +132,10 @@ wait_locked() {
         verdict=$(python3 -I -c '
 import json, sys
 s = json.loads(sys.stdin.read())
-want = [t for t in s.get("tuners", []) if t.get("enabled") and t.get("site")]
+# P25 site tuners only (they carry a traffic pool): a tuner with analog
+# channels alone reports a site label but never locks.
+want = [t for t in s.get("tuners", [])
+        if t.get("enabled") and t.get("site") and int(t.get("pool_size") or 0) > 0]
 ok = [t for t in want if t.get("locked")]
 up = s.get("uptime_s", 0)
 if want and len(ok) == len(want):

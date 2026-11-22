@@ -7,6 +7,12 @@ change configuration or behaviour; the entry says how.
 
 ## [Unreleased]
 
+- `scripts/linux/trunkd-watch.sh` with a two-minute timer: ntfy alerts, sent once when a
+  problem appears and once when it clears, for disk space, services, failed oneshots, clock
+  sync, and through the panel P25 tuner lock, device units, sample overflow and upload
+  backlog. It also covers Proxmox storage, thin pools and containers.
+- `update-trunkd.sh` verifies lock on P25 site tuners only; a tuner that carries analog
+  channels alone has nothing to lock, so an update on such a box no longer rolls back.
 - `scripts/linux/update-trunkd.sh` with a systemd service and daily timer: unattended
   updates on Linux, from the latest published GitHub release (checksum-verified) or a git ref
   built locally. Triggered by a version bump or by every new commit. Each run pre-flights the

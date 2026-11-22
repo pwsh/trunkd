@@ -1,0 +1,28 @@
+# /etc/trunkd/watch.conf - settings for trunkd-watch.sh (shell syntax).
+# Every check is off unless its setting names something; values shown are defaults
+# unless commented as an example.
+
+#NTFY_URL=https://ntfy.example.org/radio   # server + topic; empty = print to the journal only
+#NTFY_TOKEN=                               # ntfy access token, if the topic needs one
+#HOST_LABEL=$(hostname -s)                 # prefix of every notification title
+
+DISK_PATHS="/"          # mount points to watch
+DISK_WARN=85            # percent used: warning
+DISK_CRIT=95            # percent used: critical
+
+# On a recorder box
+#SERVICES="trunkd"                         # units that must be active
+#FAILED_UNITS="trunkd-update.service"      # oneshots that must not be failed
+#PANEL_URL=http://127.0.0.1:8080           # trunkd's panel: tuner lock, device units, overflow, uploads
+#PANEL_TOKEN=                              # if [server] auth needs one for reads
+SPOOL_WARN_CALLS=50     # warn when more calls than this wait in the upload spool
+
+CHECK_CLOCK=1           # warn when the clock is not NTP-synchronised (0 inside a container)
+
+# On a Proxmox host
+PVE_STORAGE=0           # 1: every active storage (pvesm status) below DISK_WARN/DISK_CRIT
+PVE_THINPOOL=0          # 1: LVM thin pools (data and metadata)
+#PVE_CONTAINERS="101"   # container ids that must be running
+
+CLEAR_AFTER=2           # consecutive good runs before a "recovered" message
+STATE_DIR=/var/lib/trunkd-watch
