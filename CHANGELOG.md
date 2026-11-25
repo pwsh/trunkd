@@ -7,6 +7,11 @@ change configuration or behaviour; the entry says how.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-24
+
+- Documentation: AM channels are recorded (the example config, the start-up checks and the
+  architecture status still said AM was skipped).
+
 ## [0.3.0] - 2026-11-24
 
 - `scripts/linux/trunkd-watch.sh` with a two-minute timer: ntfy alerts, sent once when a

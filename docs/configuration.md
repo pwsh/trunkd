@@ -239,8 +239,8 @@ sdrtrunk's `noise_open`, `noise_close`, `hysteresis_open` and `hysteresis_close`
 `trunkd import-sdrtrunk` copies across) are accepted and ignored, with one info line at start:
 they are dimensionless sdrtrunk counts with no meaning to trunkd's dB squelch.
 
-**What is checked at start** (each is a startup error naming the channel; only enabled NBFM
-channels are checked):
+**What is checked at start** (each is a startup error naming the channel; only enabled
+channels, NBFM and AM, are checked):
 
 * the device exists (or exactly one covers the frequency), has a `center_frequency`, and a
   sample rate the channelizer can drive (a multiple of 12.5 kHz giving an even bin count);

@@ -18,10 +18,10 @@ Everything downstream of "a call exists" — archive layout, search, transcripti
 retention, statistics — is Keyup's job and is deliberately **not** implemented here.
 
 > **Status (checked against the code 2026-11-11).** This document began as the design. Built today: P25 Phase 1
-> (C4FM and LSM) control and traffic decode, IMBE voice, analog NBFM conventional channels (`[[channel]]`, with
+> (C4FM and LSM) control and traffic decode, IMBE voice, analog NBFM and AM conventional channels (`[[channel]]`, with
 > CTCSS/DCS tone squelch or carrier squelch), call assembly, the Keyup and Broadcastify uplinks, the recorder link,
-> the local panel. **Not built:** P25 Phase 2 / TDMA voice (`[[site]] phase2` is a stub), AMBE, AM channels
-> (`mode = "am"` is parsed and skipped with a warning), DMR and NXDN, the `/api/v1` control API of §5.
+> the local panel. **Not built:** P25 Phase 2 / TDMA voice (`[[site]] phase2` is a stub), AMBE,
+> DMR and NXDN, the `/api/v1` control API of §5.
 > Sections below carry a *Status* note where the code differs from the design.
 
 ---
