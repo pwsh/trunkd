@@ -7,6 +7,8 @@ change configuration or behaviour; the entry says how.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
 - `scripts/linux/trunkd-watch.sh` with a two-minute timer: ntfy alerts, sent once when a
   problem appears and once when it clears, for disk space, services, failed oneshots, clock
   sync, and through the panel P25 tuner lock, device units, sample overflow and upload
